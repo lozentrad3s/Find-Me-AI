@@ -80,6 +80,19 @@ export interface UseVoiceOptions {
 
 export interface UseVoice {
   supported: boolean;
+  /** True when speech synthesis is usable in this browser. */
+  canSpeak: boolean;
+  /**
+   * Call from a real user gesture (a tap) before any async speech.
+   *
+   * iOS Safari refuses `speechSynthesis.speak()` unless the call originates
+   * in a user gesture, and it fails *silently* — no error, no event, just no
+   * sound. Since assistant replies arrive after a network round trip, they
+   * are never in a gesture, so on iPhone every spoken answer was dropped
+   * while the code looked correct. Speaking one silent utterance during a tap
+   * unlocks the queue for the rest of the session.
+   */
+  unlock: () => void;
   listening: boolean;
   /** Live transcript while speaking, including interim guesses. */
   transcript: string;
@@ -100,6 +113,8 @@ export function useVoice(options: UseVoiceOptions = {}): UseVoice {
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  const [canSpeak, setCanSpeak] = useState(false);
+  const unlockedRef = useRef(false);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   // Held in a ref so re-renders do not tear down an active recogniser.
@@ -194,6 +209,27 @@ export function useVoice(options: UseVoiceOptions = {}): UseVoice {
 
   // --- Speech synthesis ---------------------------------------------------
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setCanSpeak("speechSynthesis" in window);
+  }, []);
+
+  const unlock = useCallback(() => {
+    if (unlockedRef.current) return;
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+
+    try {
+      // A single space at zero volume: audible to the engine, silent to the
+      // user, and enough to satisfy iOS's gesture requirement.
+      const primer = new SpeechSynthesisUtterance(" ");
+      primer.volume = 0;
+      window.speechSynthesis.speak(primer);
+      unlockedRef.current = true;
+    } catch {
+      // Nothing to recover — speech simply stays unavailable.
+    }
+  }, []);
+
   const speak = useCallback((text: string) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
 
@@ -219,6 +255,20 @@ export function useVoice(options: UseVoiceOptions = {}): UseVoice {
     };
 
     window.speechSynthesis.speak(utterance);
+
+    /*
+     * Chrome stops speaking after roughly fifteen seconds unless nudged.
+     * A long answer would cut off mid-sentence without this, which sounds
+     * like a crash rather than a limitation.
+     */
+    const keepAlive = window.setInterval(() => {
+      if (!window.speechSynthesis.speaking) {
+        window.clearInterval(keepAlive);
+        return;
+      }
+      window.speechSynthesis.pause();
+      window.speechSynthesis.resume();
+    }, 10_000);
   }, []);
 
   const stopSpeaking = useCallback(() => {
@@ -231,6 +281,8 @@ export function useVoice(options: UseVoiceOptions = {}): UseVoice {
 
   return {
     supported,
+    canSpeak,
+    unlock,
     listening,
     transcript,
     error,

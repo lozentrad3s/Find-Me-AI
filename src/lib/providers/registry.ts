@@ -44,15 +44,20 @@ export function buildProviders(
   const wantPlaces = (env.PLACES_PROVIDER ?? "osm").toLowerCase();
   const wantGeocoding = (env.GEOCODING_PROVIDER ?? "osm").toLowerCase();
   /*
-   * Auto-select rather than defaulting to one and failing.
+   * The PARSE step defaults to the rule-based parser, even when a model key
+   * is present. This is deliberate and it is not a cost-saving compromise.
    *
-   * Whichever key is present wins, so a fresh clone with only a free Gemini
-   * key works without also having to know to set LLM_PROVIDER.
+   * Parsing is bounded structured extraction, and the rule-based parser
+   * scores 88% on the harness — free, instant, deterministic, and offline.
+   * Routing it through a model spends the scarcest resource in the system on
+   * the task that needs it least: on Gemini's free tier every search consumed
+   * one of about twenty daily calls, so a handful of searches exhausted the
+   * quota and the *assistant* then stopped working. That is exactly backwards.
+   *
+   * Conversation is where a model is irreplaceable. Extraction is not.
+   * Set LLM_PROVIDER explicitly to override.
    */
-  const wantLlm = (
-    env.LLM_PROVIDER ??
-    (anthropicKey ? "anthropic" : geminiKey ? "gemini" : "anthropic")
-  ).toLowerCase();
+  const wantLlm = (env.LLM_PROVIDER ?? "rules").toLowerCase();
 
   // --- Places -------------------------------------------------------------
   let places: Providers["places"];
@@ -104,12 +109,10 @@ export function buildProviders(
     );
   } else {
     if (wantLlm === "anthropic" && !anthropicKey) {
-      notes.push(
-        "ANTHROPIC_API_KEY is unset — parsing with the rule-based fallback. Search still works; the assistant runs in offline mode.",
-      );
+      notes.push("ANTHROPIC_API_KEY is unset — parsing with the rule-based parser.");
     }
     if (wantLlm === "gemini" && !geminiKey) {
-      notes.push("GEMINI_API_KEY is unset — parsing with the rule-based fallback.");
+      notes.push("GEMINI_API_KEY is unset — parsing with the rule-based parser.");
     }
     llm = new MockLlmProvider();
   }

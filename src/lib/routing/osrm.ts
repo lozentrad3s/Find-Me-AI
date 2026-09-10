@@ -35,6 +35,17 @@ export interface RouteStep {
 export interface RouteResult {
   distanceM: number;
   durationS: number;
+  /**
+   * True when the duration was derived from distance rather than routed.
+   *
+   * The public OSRM demo server only has the driving profile loaded and
+   * silently serves car routing for `foot` and `bike` — measured directly:
+   * all three profiles return an identical 10.8km / 12min for the same pair.
+   * Left uncorrected the app tells a pedestrian that a ten-kilometre walk
+   * takes twelve minutes, which is not a rounding error but a wrong answer
+   * someone could act on.
+   */
+  durationEstimated: boolean;
   /** Encoded polyline (precision 5), ready for Leaflet to decode and draw. */
   geometry: string | null;
   steps: RouteStep[];
@@ -105,6 +116,23 @@ export async function computeRoutes(
   if (!response || response.code !== "Ok" || !response.routes?.length) return [];
 
   return response.routes.map((route) => {
+    /*
+     * Correct the duration for non-driving modes.
+     *
+     * This substitutes a speed-based estimate for a routed time, which is a
+     * real loss of precision — and it is still far closer to the truth than
+     * reporting a car's travel time as a walk. Flagged so the assistant says
+     * "about", and so a self-hosted OSRM with real foot and bike profiles can
+     * drop the correction entirely.
+     */
+    const routedSeconds = Math.round(route.duration);
+    const modeSpeedMps = mode === "walking" ? 1.35 : mode === "cycling" ? 4.2 : null;
+
+    const durationS =
+      modeSpeedMps === null
+        ? routedSeconds
+        : Math.round(route.distance / modeSpeedMps);
+
     const steps: RouteStep[] = (route.legs?.[0]?.steps ?? [])
       .map((step) => ({
         instruction: describeManeuver(
@@ -119,7 +147,8 @@ export async function computeRoutes(
 
     return {
       distanceM: Math.round(route.distance),
-      durationS: Math.round(route.duration),
+      durationS,
+      durationEstimated: modeSpeedMps !== null,
       geometry: route.geometry ?? null,
       steps,
       mode,

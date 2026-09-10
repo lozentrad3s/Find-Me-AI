@@ -26,6 +26,8 @@ interface ChatBody {
   lat?: unknown;
   lng?: unknown;
   city?: unknown;
+  travelMode?: unknown;
+  accuracyM?: unknown;
 }
 
 const MAX_MESSAGES = 40;
@@ -86,6 +88,11 @@ export async function POST(request: Request): Promise<Response> {
         currentLocation:
           lat !== null && lng !== null ? { lat, lng } : undefined,
         city: typeof body.city === "string" ? body.city : undefined,
+        travelMode: parseTravelMode(body.travelMode),
+        accuracyM:
+          typeof body.accuracyM === "number" && Number.isFinite(body.accuracyM)
+            ? body.accuracyM
+            : null,
       };
 
       try {
@@ -142,6 +149,15 @@ export async function POST(request: Request): Promise<Response> {
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+/** Narrows the client-supplied mode; anything unexpected becomes undefined. */
+function parseTravelMode(
+  value: unknown,
+): "foot" | "bike" | "car" | "still" | undefined {
+  return value === "foot" || value === "bike" || value === "car" || value === "still"
+    ? value
+    : undefined;
 }
 
 function parseMessages(value: unknown): ChatMessage[] | null {

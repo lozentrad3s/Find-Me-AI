@@ -35,6 +35,7 @@ import type { LatLng } from "@/lib/geo/distance";
 import type { WeatherReport } from "@/lib/weather/open-meteo";
 import { useVoice } from "@/lib/voice/useVoice";
 import { useLocation } from "@/lib/location/useLocation";
+import { MovementTracker, MODE_LABEL, type TravelMode } from "@/lib/location/movement";
 import { DEFAULT_CITY } from "@/lib/geo/cities";
 import {
   addRecentPlace,
@@ -93,6 +94,25 @@ export default function Home() {
    */
   const geo = useLocation();
   const location = geo.point;
+
+  /*
+   * Movement, derived from consecutive fixes.
+   *
+   * The tracker lives in a ref because it holds a rolling window across
+   * renders — recreating it each render would reset the window and the mode
+   * would never settle.
+   */
+  const trackerRef = useRef(new MovementTracker());
+  const [heading, setHeading] = useState<number | null>(null);
+  const [travelMode, setTravelMode] = useState<TravelMode>("still");
+  const [followUser, setFollowUser] = useState(true);
+
+  useEffect(() => {
+    if (!geo.point) return;
+    const state = trackerRef.current.push(geo.point, geo.accuracyM ?? 50);
+    setHeading(state.heading);
+    setTravelMode(state.mode);
+  }, [geo.point, geo.accuracyM]);
   const [markers, setMarkers] = useState<MapMarker[]>([]);
   const [routeGeometry, setRouteGeometry] = useState<string | null>(null);
   const [focus, setFocus] = useState<LatLng | null>(null);
@@ -133,6 +153,10 @@ export default function Home() {
   busyRef.current = busy;
   const locationRef = useRef<LatLng | null>(null);
   locationRef.current = location;
+  const travelModeRef = useRef<TravelMode>("still");
+  travelModeRef.current = travelMode;
+  const accuracyRef = useRef<number | null>(null);
+  accuracyRef.current = geo.accuracyM;
 
   // --- boot ---------------------------------------------------------------
 
@@ -199,6 +223,9 @@ export default function Home() {
 
   const locate = useCallback(() => {
     geo.request();
+    // Tapping the crosshair means "follow me again" — the usual reason it was
+    // switched off is that the user panned the map to look elsewhere.
+    setFollowUser(true);
     if (geo.point) setFocus(geo.point);
   }, [geo]);
 
@@ -217,9 +244,7 @@ export default function Home() {
   }, [geo.error]);
 
   const locationLabel = geo.point
-    ? `${geo.point.lat.toFixed(4)}, ${geo.point.lng.toFixed(4)}${
-        geo.accuracyM ? ` · ±${geo.accuracyM}m` : ""
-      }`
+    ? `${MODE_LABEL[travelMode]} · ±${geo.accuracyM ?? "?"}m`
     : geo.status === "denied"
       ? "Location blocked — tap to retry"
       : locating
@@ -258,6 +283,10 @@ export default function Home() {
 
       inputModeRef.current = mode;
 
+      // Sending is usually a tap too — prime here as well, so a typed
+      // question with spoken replies enabled is not silently mute.
+      voice.unlock();
+
       voice.stopSpeaking();
       setChatOpen(true);
       setDetent("full");
@@ -284,6 +313,11 @@ export default function Home() {
             lat: locationRef.current?.lat,
             lng: locationRef.current?.lng,
             city: DEFAULT_CITY.id,
+            // So the assistant can route for how the user is actually
+            // travelling rather than asking, and can say "you are walking
+            // the wrong way" when that is the useful thing to say.
+            travelMode: travelModeRef.current,
+            accuracyM: accuracyRef.current,
           }),
         });
 
@@ -449,6 +483,9 @@ export default function Home() {
   }, []);
 
   const openVoice = useCallback(() => {
+    // This runs inside a tap, which is the only moment iOS will let us prime
+    // the speech queue. Without it every later reply is silently dropped.
+    voice.unlock();
     setVoiceOpen(true);
     setLastQuestion(null);
     setLiveReply("");
@@ -520,6 +557,10 @@ export default function Home() {
         routeGeometry={routeGeometry}
         focus={focus}
         dark={theme === "dark"}
+        heading={heading}
+        travelMode={travelMode}
+        accuracyM={geo.accuracyM}
+        followUser={followUser}
       />
 
       <div

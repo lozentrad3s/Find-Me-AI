@@ -42,6 +42,15 @@ export interface ToolContext {
   city?: string;
   /** Absent means no traffic source, which the tools report honestly. */
   traffic?: TrafficProvider;
+  /**
+   * How the user is currently moving, inferred from GPS speed.
+   *
+   * Lets routing default to reality instead of assuming a car, and lets the
+   * assistant skip asking a question it can already answer.
+   */
+  travelMode?: "foot" | "bike" | "car" | "still";
+  /** Fix accuracy in metres, so the assistant can hedge when it is poor. */
+  accuracyM?: number | null;
 }
 
 export interface AgentTool {
@@ -255,10 +264,24 @@ const routeTool: AgentTool = {
       return { error: "to_lat and to_lng are required numbers." };
     }
 
+    /*
+     * Default to how the user is actually moving.
+     *
+     * Routing a pedestrian along a motorway because the tool assumed a car is
+     * both wrong and unsafe, and the speed data to know better is already
+     * being collected.
+     */
+    const inferred: TravelMode =
+      context.travelMode === "foot"
+        ? "walking"
+        : context.travelMode === "bike"
+          ? "cycling"
+          : "driving";
+
     const mode: TravelMode =
-      input.mode === "walking" || input.mode === "cycling"
-        ? input.mode
-        : "driving";
+      input.mode === "walking" || input.mode === "cycling" || input.mode === "driving"
+        ? (input.mode as TravelMode)
+        : inferred;
 
     const route = await computeRoute(origin, { lat: toLat, lng: toLng }, mode);
 
@@ -275,6 +298,15 @@ const routeTool: AgentTool = {
       duration_s: route.durationS,
       duration_text: formatDuration(route.durationS),
       mode: route.mode,
+      // True when the time came from distance and an assumed speed rather
+      // than from routing. Say "about" and do not quote it to the minute.
+      duration_is_estimated: route.durationEstimated,
+      ...(route.durationEstimated
+        ? {
+            routing_note:
+              "Only car routing is available, so this walking/cycling time is estimated from the distance and the route may follow roads rather than footpaths.",
+          }
+        : {}),
       // The client draws this; the model should not try to describe it.
       geometry: route.geometry,
       steps: route.steps.slice(0, 12),
