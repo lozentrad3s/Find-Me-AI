@@ -59,6 +59,22 @@ export const DEFAULT_WEIGHTS: ScoreWeights = {
   // capturing corrections from day one matters so much.
   correctionHistory: 1.5,
   areaMatch: 1.0,
+  /*
+   * Zero on purpose — precision is applied as a discount, not a signal.
+   *
+   * It was briefly weighted at 0.9 alongside the evidence signals, and that
+   * was wrong in a way the harness caught immediately: only some sources
+   * report precision at all. A candidate that reports high precision gained a
+   * heavily-weighted signal, while one whose precision is simply *unknown* had
+   * it excluded — so "Buhari Street", a geocoded route with a known bounding
+   * box, outscored "Bluewiz Lodge", the guest house actually being asked for.
+   * Unknown precision was being punished as though it were low precision.
+   *
+   * Precision does not tell you whether this is the right *place*; it tells
+   * you how much to trust the *point* once you have decided. That is a
+   * discount on confidence, applied in `combine`, not a vote on identity.
+   */
+  pointPrecision: 0,
   sourceAgreement: 0.7,
   // Priors below this line.
   prominence: 0.15,
@@ -72,6 +88,13 @@ export const DEFAULT_WEIGHTS: ScoreWeights = {
  * "Behind" a building means tens of metres. "After the junction" can mean
  * several hundred. Treating them identically loses real information.
  */
+/**
+ * Within this distance a candidate is treated as *being* the anchor rather
+ * than sitting next to it. Geocoders disagree by a few tens of metres on the
+ * same building, so an exact-zero test would not catch it.
+ */
+const ANCHOR_SELF_RADIUS_M = 30;
+
 const RELATION_HALF_LIFE_M: Record<RelationType, number> = {
   inside: 25,
   behind: 60,
@@ -131,6 +154,7 @@ function computeSignals(
     prominence: candidate.prominence ?? null,
     sourceAgreement: scoreAgreement(candidate, agreement),
     correctionHistory: scoreHistory(candidate),
+    pointPrecision: candidate.providerConfidence ?? null,
     userProximity: context.currentLocation
       ? proximityScore(distanceMetres(context.currentLocation, candidate.point), 4000)
       : null,
@@ -258,12 +282,26 @@ function scoreAnchors(candidate: Candidate, anchors: AnchorPoint[]): number | nu
   const perAnchor: number[] = [];
   for (const group of byAnchor.values()) {
     const best = Math.max(
-      ...group.map((anchor) =>
-        proximityScore(
-          distanceMetres(anchor.point, candidate.point),
-          RELATION_HALF_LIFE_M[anchor.relation],
-        ),
-      ),
+      ...group.map((anchor) => {
+        const metres = distanceMetres(anchor.point, candidate.point);
+
+        /*
+         * The anchor is not its own answer.
+         *
+         * "That place beside the bank" explicitly excludes the bank, but the
+         * bank sits zero metres from itself and so scored a perfect 1.00 on
+         * anchor proximity — winning the very query that ruled it out. The
+         * engine then committed confidently to the wrong place on a phrase it
+         * should have asked about, which is the worst failure class there is.
+         *
+         * `inside` is the exception: "inside the mall" really does mean the
+         * mall's own position, so only the exclusive relations are guarded.
+         */
+        const isExclusive = anchor.relation !== "inside";
+        if (isExclusive && metres <= ANCHOR_SELF_RADIUS_M) return 0;
+
+        return proximityScore(metres, RELATION_HALF_LIFE_M[anchor.relation]);
+      }),
     );
     perAnchor.push(best);
   }
@@ -308,12 +346,36 @@ function combine(signals: ScoreSignals, weights: ScoreWeights): number {
   >) {
     if (value === null) continue;
     const weight = weights[key];
+    if (weight === 0) continue;
     weighted += weight * clamp01(value);
     total += weight;
   }
 
   if (total === 0) return 0;
-  return weighted / total;
+
+  return (weighted / total) * precisionDiscount(signals.pointPrecision);
+}
+
+/**
+ * How much to trust a point once the place itself has been decided.
+ *
+ * Asymmetric on purpose. A high-precision match earns no bonus — being pinned
+ * to a building says nothing about whether it is the *right* building. A
+ * genuinely coarse match is discounted, because a district centroid presented
+ * as an address sends someone to the wrong end of a neighbourhood while
+ * looking exactly like a real answer on the map.
+ *
+ * Unknown precision is treated as no discount rather than as low precision.
+ * Most sources do not report it, and punishing silence would systematically
+ * favour whichever provider happens to be chattiest.
+ */
+function precisionDiscount(precision: number | null): number {
+  if (precision === null) return 1;
+  if (precision >= 0.5) return 1;
+
+  // 0.5 -> no discount, 0.0 -> 0.7. Enough to lose a close contest to a
+  // precise rival, not enough to bury an otherwise strong match.
+  return 0.7 + 0.6 * clamp01(precision);
 }
 
 function clamp01(value: number): number {
@@ -361,6 +423,14 @@ function explain(signals: ScoreSignals, input: ScoreInput): string[] {
   }
   if ((signals.correctionHistory ?? 0) > 0.5) {
     reasons.push("previously confirmed here by users");
+  }
+  if ((signals.pointPrecision ?? 0) > 0.85) {
+    reasons.push("pinned to a specific building rather than an area");
+  }
+  // Worth saying out loud: an area-level answer looks identical to a precise
+  // one on a map until you arrive at the wrong end of the district.
+  if (signals.pointPrecision !== null && signals.pointPrecision < 0.35) {
+    reasons.push("located to an area, not an exact point");
   }
 
   return reasons;

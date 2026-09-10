@@ -104,6 +104,8 @@ interface NominatimPlace {
   type?: string;
   place_rank?: number;
   importance?: number;
+  /** [south, north, west, east] as strings. */
+  boundingbox?: [string, string, string, string];
   addresstype?: string;
   address?: Record<string, string>;
 }
@@ -139,6 +141,59 @@ function toName(place: NominatimPlace): string {
   return first || "Unnamed place";
 }
 
+/**
+ * How precisely this result locates a point, 0..1.
+ *
+ * Two independent signals, and the lower wins:
+ *
+ * `place_rank` is OSM's own hierarchy, 0 (continent) to 30 (single building).
+ * A rank-30 hit is a specific address; a rank-16 hit is a whole suburb whose
+ * "coordinate" is just its centre.
+ *
+ * The bounding box is the physical reality check. A result can carry a high
+ * rank while spanning kilometres, and a point returned for a 5km box is a
+ * centroid however precise its rank claims to be.
+ *
+ * This was previously computed for geocoder results and then thrown away —
+ * nothing in the scorer read it — so a district centroid competed on equal
+ * footing with a rooftop match. That is the single most direct cause of an
+ * imprecise pin.
+ */
+function toPrecision(place: NominatimPlace): number | undefined {
+  const rank = place.place_rank;
+  const byRank =
+    typeof rank === "number"
+      ? Math.min(1, Math.max(0, (rank - 12) / 18))
+      : undefined;
+
+  const box = place.boundingbox;
+  let byExtent: number | undefined;
+
+  if (box && box.length === 4) {
+    const south = Number.parseFloat(box[0]);
+    const north = Number.parseFloat(box[1]);
+    const west = Number.parseFloat(box[2]);
+    const east = Number.parseFloat(box[3]);
+
+    if ([south, north, west, east].every(Number.isFinite)) {
+      // Rough metres across, using the larger dimension.
+      const latSpan = Math.abs(north - south) * 111_320;
+      const lngSpan =
+        Math.abs(east - west) * 111_320 * Math.cos((south * Math.PI) / 180);
+      const span = Math.max(latSpan, lngSpan);
+
+      // ~50m across is a building; ~2km is a district.
+      byExtent = span <= 50 ? 1 : span >= 2000 ? 0.1 : 1 - (span - 50) / 1950;
+    }
+  }
+
+  if (byRank === undefined) return byExtent;
+  if (byExtent === undefined) return byRank;
+
+  // Believe the more pessimistic of the two.
+  return Math.min(byRank, byExtent);
+}
+
 function toPlaceResult(place: NominatimPlace): PlaceResult[] {
   const point = toLatLng(place);
   if (!point) return [];
@@ -151,6 +206,7 @@ function toPlaceResult(place: NominatimPlace): PlaceResult[] {
       point,
       types: [place.category, place.type].filter((t): t is string => Boolean(t)),
       prominence: toProminence(place),
+      providerConfidence: toPrecision(place),
     },
   ];
 }

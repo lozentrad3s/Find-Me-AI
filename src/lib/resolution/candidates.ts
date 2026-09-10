@@ -171,7 +171,20 @@ function queryLadder(parsed: ParsedPlace, rawPhrase: string): string[] {
   };
 
   if (placeName) {
-    add([placeName, street, locality]);
+    /*
+     * The category word stays in when a name is present.
+     *
+     * Measured against live Nominatim: "Nnamdi Azikiwe Abuja" returns the
+     * *Expressway*, while "Nnamdi Azikiwe airport Abuja" returns the
+     * International Airport. Dropping the type produced a confidently wrong
+     * answer for a major landmark, because the name alone is genuinely
+     * ambiguous — a road and an airport share it.
+     *
+     * This is the opposite of the rule for a *bare* category query, where the
+     * type word poisons the search. With a proper name present the type
+     * disambiguates rather than dilutes.
+     */
+    add([placeName, placeType, street, locality]);
     add([placeName, city]);
   } else if (street) {
     add([street, locality]);
@@ -224,6 +237,7 @@ async function fromTextSearch(
       placeId: result.placeId,
       types: result.types,
       prominence: result.prominence,
+      providerConfidence: result.providerConfidence,
     }));
   }
 
@@ -258,22 +272,20 @@ async function fromCategoryNearCentre(
   if (!category) return [];
 
   /*
-   * Skip Overpass when Nominatim already covers this category.
+   * Overpass runs for every category query, not only the ones Nominatim
+   * cannot phrase.
    *
-   * Both sources answer the same question, but Nominatim does it in about a
-   * second and a half while Overpass — volunteer-run, no SLA — swings between
-   * two and twenty. Firing both in parallel does not hedge the risk, it
-   * guarantees paying the slower one: the response cannot return until every
-   * branch settles, so Overpass's timeout became the floor on every category
-   * query.
+   * It was previously skipped whenever `categoryQuery` produced something, on
+   * the assumption Nominatim would answer. That assumption fails silently:
+   * "mosque in Wuse 2, abuja" is a perfectly well-formed Nominatim category
+   * query and returns *zero* results, so skipping Overpass left no category
+   * candidates at all and the engine fell through to the district polygon —
+   * answering "Wuse 2" when asked for a mosque.
    *
-   * So Overpass now runs only for the categories Nominatim's vocabulary does
-   * not include, where it is the difference between an answer and nothing.
+   * Being able to phrase a query is not the same as being able to answer it.
+   * Overpass is on a different host with its own 4s budget and runs in
+   * parallel with the ladder, so the cost is bounded and correctness wins.
    */
-  if (categoryQuery(parsed.placeType ?? "", parsed.area, parsed.city)) {
-    return [];
-  }
-
   const results = await providers.places
     .nearbySearch({
       center: centre,
@@ -292,6 +304,7 @@ async function fromCategoryNearCentre(
     placeId: result.placeId,
     types: result.types,
     prominence: result.prominence,
+    providerConfidence: result.providerConfidence,
   }));
 }
 

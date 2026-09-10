@@ -27,6 +27,14 @@ export interface PlaceResult {
   types: string[];
   /** Normalised 0..1 importance. Providers report this differently. */
   prominence?: number;
+  /**
+   * How tightly the provider located this point, 0..1.
+   *
+   * A rooftop match and a district centroid are different claims and must not
+   * compete on equal footing. Nominatim reports it via place_rank and the
+   * bounding box; Google via location_type.
+   */
+  providerConfidence?: number;
   rating?: number;
   userRatingCount?: number;
 }

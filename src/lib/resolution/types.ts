@@ -162,6 +162,13 @@ export interface ScoreSignals {
   correctionHistory: number | null;
   /** Mild prior that people ask about places near themselves. */
   userProximity: number | null;
+  /**
+   * How tightly the source located this point.
+   *
+   * A rooftop match and a district centroid are not the same claim, and
+   * treating them as one is the most direct cause of an imprecise pin.
+   */
+  pointPrecision: number | null;
 }
 
 export type ScoreWeights = Record<keyof ScoreSignals, number>;
