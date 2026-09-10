@@ -20,6 +20,7 @@ import { Crosshair, Loader2, Shield } from "lucide-react";
 
 import Assistant, { type ChatTurn, type TraceItem } from "@/components/Assistant";
 import VoiceOverlay, { type VoiceState } from "@/components/VoiceOverlay";
+import SosSheet from "@/components/panels/SosSheet";
 import BottomSheet, { type Detent } from "@/components/shell/BottomSheet";
 import BottomNav, { type TabId } from "@/components/shell/BottomNav";
 import HomePanel from "@/components/panels/HomePanel";
@@ -100,6 +101,9 @@ export default function Home() {
   const [speakReplies, setSpeakReplies] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [lastQuestion, setLastQuestion] = useState<string | null>(null);
+  const [sosOpen, setSosOpen] = useState(false);
+  /** Human-readable position, filled by the last surroundings scan. */
+  const [locationDescription, setLocationDescription] = useState<string | null>(null);
 
   // Refs for callbacks that must not re-subscribe on every render.
   const turnsRef = useRef<ChatTurn[]>([]);
@@ -304,6 +308,18 @@ export default function Home() {
                 setLiveTrace([...trace]);
               },
               onToolResult: (name, result) => {
+                if (
+                  name === "scan_surroundings" &&
+                  typeof result === "object" &&
+                  result !== null &&
+                  typeof (result as { spoken_description?: unknown })
+                    .spoken_description === "string"
+                ) {
+                  setLocationDescription(
+                    (result as { spoken_description: string }).spoken_description,
+                  );
+                }
+
                 const band = applyToolResult(name, result, {
                   setMarkers,
                   setRouteGeometry,
@@ -490,12 +506,8 @@ export default function Home() {
         </FloatingButton>
 
         <FloatingButton
-          onClick={() => {
-            setTab("safety");
-            setChatOpen(false);
-            setDetent("half");
-          }}
-          title="Safety and SOS"
+          onClick={() => setSosOpen(true)}
+          title="Emergency SOS"
           danger
         >
           <Shield size={18} />
@@ -563,7 +575,7 @@ export default function Home() {
         ) : tab === "safety" ? (
           <SafetyPanel
             locationLabel={locationLabel}
-            onSos={shareLocation}
+            onSos={() => setSosOpen(true)}
             onShareLocation={shareLocation}
           />
         ) : (
@@ -590,6 +602,13 @@ export default function Home() {
         }}
         onVoice={openVoice}
         listening={voice.listening}
+      />
+
+      <SosSheet
+        open={sosOpen}
+        location={location}
+        locationDescription={locationDescription}
+        onClose={() => setSosOpen(false)}
       />
 
       <VoiceOverlay

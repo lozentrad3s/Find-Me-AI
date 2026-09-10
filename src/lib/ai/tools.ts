@@ -31,6 +31,7 @@ import { decodePolyline } from "@/lib/geo/polyline";
 import { NoTrafficProvider, type TrafficProvider } from "@/lib/traffic/types";
 import { getWeather } from "@/lib/weather/open-meteo";
 import { scanSurroundings } from "@/lib/resolution/surroundings";
+import { getJourneyWeather } from "@/lib/weather/journey";
 
 export type RiskTier = "read" | "write" | "notify" | "emergency" | "financial";
 
@@ -444,6 +445,67 @@ const weatherTool: AgentTool = {
   },
 };
 
+const journeyWeatherTool: AgentTool = {
+  name: "check_journey_weather",
+  tier: "read",
+  description:
+    "Compare weather where the user is against weather where they are going. Call this whenever someone mentions travelling to another town or city — 'I'm going to Abuja tomorrow', 'heading to Jos'. It is dry in Jos and storming in Abuja often enough that this is the most useful thing you can volunteer. If `alert` is null, say nothing about weather; if it is set, say it in one sentence.",
+  input_schema: {
+    type: "object",
+    properties: {
+      to_lat: { type: "number", description: "Destination latitude." },
+      to_lng: { type: "number", description: "Destination longitude." },
+      to_name: { type: "string", description: 'Destination name, e.g. "Abuja".' },
+      from_lat: { type: "number", description: "Origin latitude. Defaults to the user." },
+      from_lng: { type: "number", description: "Origin longitude. Defaults to the user." },
+      from_name: { type: "string", description: "Origin name." },
+    },
+    required: ["to_lat", "to_lng"],
+  },
+  async execute(input, context) {
+    const origin =
+      typeof input.from_lat === "number" && typeof input.from_lng === "number"
+        ? { lat: input.from_lat, lng: input.from_lng }
+        : context.currentLocation;
+
+    if (!origin) return NO_LOCATION;
+
+    const toLat = input.to_lat;
+    const toLng = input.to_lng;
+    if (typeof toLat !== "number" || typeof toLng !== "number") {
+      return { error: "to_lat and to_lng are required numbers." };
+    }
+
+    const journey = await getJourneyWeather(
+      origin,
+      { lat: toLat, lng: toLng },
+      {
+        origin: typeof input.from_name === "string" ? input.from_name : undefined,
+        destination: typeof input.to_name === "string" ? input.to_name : undefined,
+      },
+    );
+
+    const summarise = (side: typeof journey.origin) =>
+      side.report
+        ? {
+            place: side.label,
+            temperature_c: Math.round(side.report.current.temperatureC),
+            conditions: side.report.current.description,
+            rain_chance_today_pct: side.report.daily[0]?.rainChancePct ?? null,
+          }
+        : null;
+
+    return {
+      here: summarise(journey.origin),
+      there: summarise(journey.destination),
+      destination_is_worse: journey.destinationWorse,
+      // Null means conditions are unremarkable. Say nothing rather than
+      // filling the silence with a weather report nobody asked for.
+      alert: journey.alert,
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -456,6 +518,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   routeConditionsTool,
   weatherTool,
   scanSurroundingsTool,
+  journeyWeatherTool,
 ];
 
 export const TOOLS_BY_NAME = new Map(

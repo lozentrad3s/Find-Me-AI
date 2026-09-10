@@ -1,0 +1,219 @@
+/* SOS — screen 9 of the design reference.
+   The one place red is used, and the only screen that takes over completely. */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background:
+    radial-gradient(circle at 50% 35%, rgb(239 68 68 / 0.28), transparent 60%),
+    #1a0505;
+  color: #fff5f5;
+  padding: var(--space-5) var(--space-4)
+    calc(var(--space-5) + env(safe-area-inset-bottom, 0));
+  overflow-y: auto;
+}
+
+.topBar {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.subtitle {
+  font-size: 12.5px;
+  color: rgb(255 245 245 / 0.6);
+}
+
+.close {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: rgb(255 255 255 / 0.08);
+  color: #fff5f5;
+}
+
+.close:hover {
+  background: rgb(255 255 255 / 0.16);
+}
+
+.stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: 460px;
+  padding: var(--space-5) 0;
+}
+
+/* --- the button ----------------------------------------------------------- */
+
+.buttonWrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 210px;
+  height: 210px;
+}
+
+.buttonWrap::before {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  border-radius: 50%;
+  background: rgb(239 68 68 / 0.35);
+}
+
+/* Only pulses while armed. A permanently pulsing emergency control is
+   wallpaper within a day, and then it reads as decoration in the moment it
+   matters. */
+.buttonWrap[data-holding="true"]::before {
+  animation: fm-orb-ripple 1.1s var(--ease) infinite;
+}
+
+.button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  width: 170px;
+  height: 170px;
+  border: 4px solid rgb(255 255 255 / 0.2);
+  border-radius: 50%;
+  background: linear-gradient(160deg, #ef4444, #b91c1c);
+  color: #fff;
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  box-shadow: 0 16px 50px -12px rgb(239 68 68 / 0.75);
+  transition: transform var(--dur-fast) var(--ease);
+  touch-action: none;
+}
+
+.button:active {
+  transform: scale(0.97);
+}
+
+.buttonHint {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
+/* Fills as the hold progresses. Deliberate, visible, and cancellable. */
+.progressRing {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+/* --- status --------------------------------------------------------------- */
+
+.status {
+  text-align: center;
+  min-height: 48px;
+}
+
+.statusTitle {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.statusBody {
+  margin: 0;
+  font-size: 13.5px;
+  color: rgb(255 245 245 / 0.7);
+  line-height: 1.55;
+}
+
+.locationBox {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: rgb(255 255 255 / 0.07);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.coords {
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  color: rgb(255 245 245 / 0.85);
+  word-break: break-all;
+}
+
+/* --- actions -------------------------------------------------------------- */
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  max-width: 460px;
+  flex-shrink: 0;
+}
+
+.action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 13px var(--space-4);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: var(--radius-md);
+  background: rgb(255 255 255 / 0.07);
+  color: #fff5f5;
+  font-size: 14.5px;
+  font-weight: 550;
+  text-align: left;
+  text-decoration: none;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.action:hover {
+  background: rgb(255 255 255 / 0.14);
+}
+
+.action[data-primary="true"] {
+  background: #fff5f5;
+  color: #7f1d1d;
+  border-color: transparent;
+}
+
+.actionMeta {
+  margin-left: auto;
+  font-size: 11.5px;
+  opacity: 0.65;
+  font-weight: 500;
+}
+
+.honest {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: rgb(255 255 255 / 0.06);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgb(255 245 245 / 0.72);
+}

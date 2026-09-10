@@ -88,6 +88,9 @@ const TOOL_LABEL: Record<string, { label: string; Icon: typeof MapPin }> = {
   where_am_i: { label: "Locating you", Icon: Compass },
   calculate_route: { label: "Working out the route", Icon: Route },
   check_route_conditions: { label: "Checking the route", Icon: Route },
+  scan_surroundings: { label: "Scanning your surroundings", Icon: Compass },
+  get_weather: { label: "Checking the weather", Icon: Search },
+  check_journey_weather: { label: "Checking weather ahead", Icon: Route },
 };
 
 const BAND_LABEL = {
