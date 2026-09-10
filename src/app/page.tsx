@@ -34,6 +34,7 @@ import type { MapMarker } from "@/components/MapView";
 import type { LatLng } from "@/lib/geo/distance";
 import type { WeatherReport } from "@/lib/weather/open-meteo";
 import { useVoice } from "@/lib/voice/useVoice";
+import { useLocation } from "@/lib/location/useLocation";
 import { DEFAULT_CITY } from "@/lib/geo/cities";
 import {
   addRecentPlace,
@@ -53,6 +54,9 @@ const MapView = dynamic(() => import("@/components/MapView"), {
 });
 
 type Theme = "light" | "dark";
+
+/** Spoken once when the microphone opens, then listening begins. */
+const GREETING = "Hello, I'm Find Me. What would you like to do today?";
 
 interface ResolveResultShape {
   band?: "high" | "moderate" | "low";
@@ -80,9 +84,15 @@ export default function Home() {
   const [chatOpen, setChatOpen] = useState(false);
 
   // --- location and map ---------------------------------------------------
-  const [location, setLocation] = useState<LatLng | null>(null);
-  const [locating, setLocating] = useState(false);
-  const [locationLabel, setLocationLabel] = useState("Abuja");
+  /*
+   * Location comes from a hook that asks on load when permission already
+   * exists and then watches for a better fix. The previous version only ever
+   * requested on a button tap, so the assistant reported "no location shared"
+   * on devices that had granted permission — the single worst bug in the app,
+   * because the user had done everything right.
+   */
+  const geo = useLocation();
+  const location = geo.point;
   const [markers, setMarkers] = useState<MapMarker[]>([]);
   const [routeGeometry, setRouteGeometry] = useState<string | null>(null);
   const [focus, setFocus] = useState<LatLng | null>(null);
@@ -102,6 +112,15 @@ export default function Home() {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [lastQuestion, setLastQuestion] = useState<string | null>(null);
   const [sosOpen, setSosOpen] = useState(false);
+  /*
+   * How the current turn arrived.
+   *
+   * Spoken questions get spoken answers; typed questions get typed ones. The
+   * previous behaviour keyed off a "speak replies" toggle that defaulted to
+   * off, so voice input produced a silent text reply — which reads as the
+   * assistant ignoring you.
+   */
+  const inputModeRef = useRef<"voice" | "text">("text");
   /** Human-readable position, filled by the last surroundings scan. */
   const [locationDescription, setLocationDescription] = useState<string | null>(null);
 
@@ -176,55 +195,56 @@ export default function Home() {
 
   // --- location -----------------------------------------------------------
 
+  const locating = geo.status === "locating" || geo.status === "prompting";
+
   const locate = useCallback(() => {
-    if (!("geolocation" in navigator)) {
-      setNotice("This browser cannot report your location.");
-      return;
+    geo.request();
+    if (geo.point) setFocus(geo.point);
+  }, [geo]);
+
+  // Centre the map the first time a fix arrives, and surface permission
+  // problems where the user will actually see them.
+  const centredOnce = useRef(false);
+  useEffect(() => {
+    if (geo.point && !centredOnce.current) {
+      centredOnce.current = true;
+      setFocus(geo.point);
     }
+  }, [geo.point]);
 
-    setLocating(true);
+  useEffect(() => {
+    if (geo.error) setNotice(geo.error);
+  }, [geo.error]);
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const point = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        };
-        setLocation(point);
-        setFocus(point);
-        setLocating(false);
-        setLocationLabel(
-          `${point.lat.toFixed(3)}, ${point.lng.toFixed(3)} · ±${Math.round(
-            position.coords.accuracy,
-          )}m`,
-        );
-        setNotice(null);
-      },
-      (error) => {
-        setLocating(false);
-        setNotice(
-          error.code === error.PERMISSION_DENIED
-            ? "Location permission denied. You can still search by name."
-            : "Could not get a fix. You can still search by name.",
-        );
-      },
-      { enableHighAccuracy: true, timeout: 12_000, maximumAge: 30_000 },
-    );
-  }, []);
+  const locationLabel = geo.point
+    ? `${geo.point.lat.toFixed(4)}, ${geo.point.lng.toFixed(4)}${
+        geo.accuracyM ? ` · ±${geo.accuracyM}m` : ""
+      }`
+    : geo.status === "denied"
+      ? "Location blocked — tap to retry"
+      : locating
+        ? "Finding you…"
+        : "Tap the crosshair to share location";
 
   // --- voice --------------------------------------------------------------
 
   const voice = useVoice({
     onFinalTranscript: (transcript) => {
       setLastQuestion(transcript);
-      void send(transcript);
+      void send(transcript, "voice");
     },
     onSpeechEnd: () => {
-      // Re-arm only while the overlay is open, so the panel mic stays one-shot.
+      /*
+       * Listening resumes the moment speech ends — including after the
+       * greeting, which is what makes the open-mic flow feel continuous
+       * rather than requiring a second tap.
+       *
+       * Only while the overlay is open, so the panel mic stays one-shot.
+       */
       if (voiceOpenRef.current && !busyRef.current) {
         window.setTimeout(() => {
           if (voiceOpenRef.current && !busyRef.current) voice.start();
-        }, 350);
+        }, 250);
       }
     },
   });
@@ -232,9 +252,11 @@ export default function Home() {
   // --- chat ---------------------------------------------------------------
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, mode: "voice" | "text" = "text") => {
       const trimmed = text.trim();
       if (!trimmed || busy) return;
+
+      inputModeRef.current = mode;
 
       voice.stopSpeaking();
       setChatOpen(true);
@@ -357,7 +379,9 @@ export default function Home() {
             },
           ]);
 
-          if (speakReplies || voiceOpenRef.current) {
+          // Voice in, voice out. The toggle only forces speech for typed
+          // input; a spoken question is always answered aloud.
+          if (inputModeRef.current === "voice" || speakReplies) {
             voice.speak(assistantText.trim());
           }
         }
@@ -428,7 +452,19 @@ export default function Home() {
     setVoiceOpen(true);
     setLastQuestion(null);
     setLiveReply("");
-    if (voice.supported) voice.start();
+
+    if (!voice.supported) return;
+
+    /*
+     * Greet, then listen.
+     *
+     * Opening a microphone into silence gives no signal that anything is
+     * live — people wait, then speak into a recogniser that already timed
+     * out. Speaking first establishes the turn, and listening starts from
+     * onSpeechEnd so the greeting is never transcribed as user input.
+     */
+    inputModeRef.current = "voice";
+    voice.speak(GREETING);
   }, [voice]);
 
   const closeVoice = useCallback(() => {
@@ -529,11 +565,11 @@ export default function Home() {
                 return !value;
               });
             }}
-            onSend={(text) => void send(text)}
+            onSend={(text) => void send(text, "text")}
             locationLabel={locationLabel}
             usage={usage}
             onOpenVoice={openVoice}
-            onClose={() => setChatOpen(false)}
+            onClose={() => { setChatOpen(false); setTab("home"); }}
             embedded
           />
         ) : tab === "home" ? (
@@ -549,7 +585,7 @@ export default function Home() {
               setDetent("full");
             }}
             onVoice={openVoice}
-            onAsk={(phrase) => void send(phrase)}
+            onAsk={(phrase) => void send(phrase, "text")}
             onOpenPlace={openPlace}
           />
         ) : tab === "explore" ? (
@@ -560,6 +596,26 @@ export default function Home() {
             activeCategory={activeCategory}
             onCategory={(category, label) => void loadNearby(category, label)}
             onOpenPlace={openPlace}
+          />
+        ) : tab === "chat" ? (
+          <Assistant
+            turns={turns}
+            busy={busy}
+            liveTrace={liveTrace}
+            notice={notice}
+            voice={voice}
+            speakReplies={speakReplies}
+            onToggleSpeakReplies={() => {
+              setSpeakReplies((value) => {
+                if (value) voice.stopSpeaking();
+                return !value;
+              });
+            }}
+            onSend={(text) => void send(text, "text")}
+            locationLabel={locationLabel}
+            usage={usage}
+            onOpenVoice={openVoice}
+            embedded
           />
         ) : tab === "trips" ? (
           <TripsPanel
@@ -594,8 +650,8 @@ export default function Home() {
         active={tab}
         onChange={(next) => {
           setTab(next);
-          setChatOpen(false);
-          setDetent("half");
+          setChatOpen(next === "chat");
+          setDetent(next === "chat" ? "full" : "half");
           if (next === "explore" && nearby.length === 0 && !nearbyLoading) {
             void loadNearby("", "Nearby");
           }
@@ -624,7 +680,7 @@ export default function Home() {
         onToggleListening={voice.toggle}
         onAsk={(text) => {
           setLastQuestion(text);
-          void send(text);
+          void send(text, "voice");
         }}
       />
     </main>

@@ -57,9 +57,23 @@ export const DEFAULT_GEMINI_MODEL = "gemini-3.7-flash";
  */
 const FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.8-flash"];
 
-function isQuotaError(error: unknown): boolean {
+/**
+ * Failures that another model might not have.
+ *
+ * Quota is per-model, so a 429 on one says nothing about the next. So does a
+ * 503: "this model is currently experiencing high demand" is a property of
+ * that model at that moment, and Google returns it often enough on the free
+ * tier that not rolling over leaves the assistant dead for minutes at a time.
+ *
+ * Everything else propagates. A malformed request fails identically on every
+ * model, and retrying it three times only makes the user wait three times as
+ * long for the same error.
+ */
+function isRetryableOnAnotherModel(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /429|RESOURCE_EXHAUSTED|quota/i.test(message);
+  return /429|RESOURCE_EXHAUSTED|quota|503|UNAVAILABLE|high demand|overloaded/i.test(
+    message,
+  );
 }
 
 /** Same ceiling as the Claude agent: cost and latency, not capability. */
@@ -143,7 +157,12 @@ export async function* runGeminiAgent(
           });
           break;
         } catch (error) {
-          if (!isQuotaError(error) || modelIndex >= ladder.length - 1) throw error;
+          if (
+            !isRetryableOnAnotherModel(error) ||
+            modelIndex >= ladder.length - 1
+          ) {
+            throw error;
+          }
           modelIndex += 1;
           model = ladder[modelIndex]!;
         }
@@ -297,7 +316,10 @@ function describeError(error: unknown): string {
   // The three failures a Gemini key actually hits, named plainly rather than
   // handed back as a raw stack.
   if (/429|RESOURCE_EXHAUSTED|quota/i.test(message)) {
-    return "Gemini free-tier limit reached — it resets after a minute. Try again shortly.";
+    return "Gemini's free-tier daily limit is reached on every model right now. It resets tomorrow, or add a paid plan.";
+  }
+  if (/503|UNAVAILABLE|high demand|overloaded/i.test(message)) {
+    return "Gemini is overloaded on every model right now. Try again in a moment.";
   }
   if (/API key|401|403|PERMISSION_DENIED|API_KEY_INVALID/i.test(message)) {
     return "The Gemini API key was rejected. Check GEMINI_API_KEY in .env.local.";

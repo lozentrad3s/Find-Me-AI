@@ -13,11 +13,11 @@
  * are the fallback for when you would rather tap than talk.
  */
 
-import { Compass, Home, Mic, Route, Shield, User } from "lucide-react";
+import { Compass, Home, MessageSquare, Mic, Route, Shield, User } from "lucide-react";
 
 import styles from "./BottomNav.module.css";
 
-export type TabId = "home" | "explore" | "trips" | "safety" | "profile";
+export type TabId = "home" | "explore" | "chat" | "trips" | "safety" | "profile";
 
 export interface BottomNavProps {
   active: TabId;
@@ -31,8 +31,15 @@ const LEFT_TABS: Array<{ id: TabId; label: string; Icon: typeof Home }> = [
   { id: "explore", label: "Explore", Icon: Compass },
 ];
 
+/*
+ * Chat sits in the bar rather than only behind the search field.
+ *
+ * It was reachable only by tapping "Ask Find Me…" on Home, which nobody found
+ * — the first real user reported the app had no chat at all. A conversational
+ * product must have a visible way in.
+ */
 const RIGHT_TABS: Array<{ id: TabId; label: string; Icon: typeof Home }> = [
-  { id: "trips", label: "Trips", Icon: Route },
+  { id: "chat", label: "Chat", Icon: MessageSquare },
   { id: "profile", label: "Profile", Icon: User },
 ];
 
