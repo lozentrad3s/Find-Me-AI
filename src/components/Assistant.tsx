@@ -22,6 +22,7 @@ import {
   Search,
   Volume2,
   VolumeX,
+  X,
 } from "lucide-react";
 
 import styles from "./Assistant.module.css";
@@ -58,6 +59,10 @@ export interface AssistantProps {
   usage?: UsageReadout | null;
   /** Opens the full-screen voice assistant. */
   onOpenVoice: () => void;
+  /** Returns to the panel behind the conversation. */
+  onClose?: () => void;
+  /** True when rendered inside the bottom sheet, which owns the chrome. */
+  embedded?: boolean;
 }
 
 export interface UsageReadout {
@@ -103,6 +108,8 @@ export default function Assistant({
   locationLabel,
   usage,
   onOpenVoice,
+  onClose,
+  embedded = false,
 }: AssistantProps) {
   const [draft, setDraft] = useState("");
   const [collapsed, setCollapsed] = useState(false);
@@ -132,7 +139,7 @@ export default function Assistant({
 
   return (
     <section
-      className={styles.panel}
+      className={embedded ? styles.embedded : styles.panel}
       data-collapsed={collapsed}
       aria-label="Find Me assistant"
     >
@@ -161,24 +168,36 @@ export default function Assistant({
             </span>
           </button>
 
-          <button
-            type="button"
-            className={styles.iconButton}
-            onClick={() => setCollapsed((value) => !value)}
-            aria-expanded={!collapsed}
-            title={collapsed ? "Show conversation" : "Hide conversation"}
-          >
-            <ChevronDown
-              size={18}
-              style={{
-                transform: collapsed ? "rotate(180deg)" : "none",
-                transition: "transform var(--dur) var(--ease)",
-              }}
-            />
-            <span className="sr-only">
-              {collapsed ? "Show conversation" : "Hide conversation"}
-            </span>
-          </button>
+          {embedded && onClose ? (
+            <button
+              type="button"
+              className={styles.iconButton}
+              onClick={onClose}
+              title="Close conversation"
+            >
+              <X size={18} />
+              <span className="sr-only">Close conversation</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={styles.iconButton}
+              onClick={() => setCollapsed((value) => !value)}
+              aria-expanded={!collapsed}
+              title={collapsed ? "Show conversation" : "Hide conversation"}
+            >
+              <ChevronDown
+                size={18}
+                style={{
+                  transform: collapsed ? "rotate(180deg)" : "none",
+                  transition: "transform var(--dur) var(--ease)",
+                }}
+              />
+              <span className="sr-only">
+                {collapsed ? "Show conversation" : "Hide conversation"}
+              </span>
+            </button>
+          )}
         </span>
       </header>
 

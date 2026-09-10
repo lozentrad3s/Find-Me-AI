@@ -12,6 +12,7 @@
 
 import { buildProviders } from "@/lib/providers/registry";
 import { runAgent, type ChatMessage } from "@/lib/ai/agent";
+import { runOfflineAgent } from "@/lib/ai/offline-agent";
 import { NoTrafficProvider } from "@/lib/traffic/types";
 import { TomTomTrafficProvider } from "@/lib/traffic/tomtom";
 
@@ -30,17 +31,20 @@ const MAX_MESSAGES = 40;
 const MAX_CONTENT_LENGTH = 4000;
 
 export async function POST(request: Request): Promise<Response> {
+  /*
+   * No key is a degraded mode, not an error.
+   *
+   * Returning 503 here meant the entire conversational surface — chat, voice,
+   * the tool trace, the map wiring driven by tool results — was untestable
+   * until someone had billing set up. The offline agent runs the same tools
+   * through the same event stream using keyword matching, so all of that can
+   * be built and used now, and swapping in Claude changes one branch.
+   *
+   * It announces itself as offline in its first reply. A user who believes
+   * they are talking to an assistant while actually talking to a regex will
+   * conclude the assistant is bad, and they would be right.
+   */
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-
-  if (!apiKey) {
-    return Response.json(
-      {
-        error:
-          "ANTHROPIC_API_KEY is not set. Add it to .env.local and restart the dev server — search and the map work without it, but the assistant does not.",
-      },
-      { status: 503 },
-    );
-  }
 
   let body: ChatBody;
   try {
@@ -75,20 +79,32 @@ export async function POST(request: Request): Promise<Response> {
 
   const stream = new ReadableStream({
     async start(controller) {
+      const toolContext = {
+        providers,
+        traffic,
+        currentLocation:
+          lat !== null && lng !== null ? { lat, lng } : undefined,
+        city: typeof body.city === "string" ? body.city : undefined,
+      };
+
       try {
-        for await (const event of runAgent({
-          apiKey,
-          messages,
-          model: process.env.ANTHROPIC_CHAT_MODEL?.trim() || undefined,
-          context: {
-            providers,
-            traffic,
-            currentLocation:
-              lat !== null && lng !== null ? { lat, lng } : undefined,
-            city: typeof body.city === "string" ? body.city : undefined,
-          },
-          signal: request.signal,
-        })) {
+        const stream = apiKey
+          ? runAgent({
+              apiKey,
+              messages,
+              model: process.env.ANTHROPIC_CHAT_MODEL?.trim() || undefined,
+              context: toolContext,
+              signal: request.signal,
+            })
+          : runOfflineAgent({
+              messages,
+              context: toolContext,
+              // Only the first exchange explains the mode; repeating it every
+              // turn would bury the answers.
+              announce: messages.length <= 1,
+            });
+
+        for await (const event of stream) {
           send(controller, event);
         }
       } catch (error) {

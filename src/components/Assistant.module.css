@@ -413,3 +413,20 @@
   color: var(--fg-subtle);
   line-height: 1.45;
 }
+
+/* Embedded in the bottom sheet: the sheet supplies the surface, the blur and
+   the rounding, so this variant contributes only layout. */
+.embedded {
+  display: flex;
+  flex-direction: column;
+  /* The sheet body scrolls; the conversation fills it and manages its own. */
+  height: 100%;
+  min-height: 320px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.embedded .thread {
+  min-height: 200px;
+}

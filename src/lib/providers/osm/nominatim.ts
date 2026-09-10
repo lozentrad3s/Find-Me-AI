@@ -292,7 +292,72 @@ export class NominatimPlacesProvider implements PlacesProvider {
     return results.flatMap(toPlaceResult);
   }
 
-  nearbySearch(input: NearbySearchInput): Promise<PlaceResult[]> {
-    return this.nearby.nearbySearch(input);
+  /**
+   * Radius search, on Nominatim when it can answer and Overpass otherwise.
+   *
+   * A `bounded=1` viewbox query is effectively a radius search, and measured
+   * against the live services it returned six pharmacies around Maitama in
+   * 2.3s while the Overpass path returned nothing at all — Overpass is
+   * volunteer-run and its load varies enormously.
+   *
+   * So the reliable path runs first and Overpass becomes the fallback for
+   * categories outside Nominatim's vocabulary, where it is genuinely the only
+   * option. This is the same division of labour the resolution pipeline
+   * settled on, applied here so Explore and the assistant both benefit.
+   */
+  async nearbySearch(input: NearbySearchInput): Promise<PlaceResult[]> {
+    const phrase = input.keyword ? NOMINATIM_CATEGORY[input.keyword.trim().toLowerCase()] : null;
+
+    if (!phrase) return this.nearby.nearbySearch(input);
+
+    const { center, radiusM } = input;
+
+    // Longitude degrees shrink with latitude, so the box would be too narrow
+    // near the poles without the cosine term. Abuja is near the equator, but
+    // getting this wrong silently is not worth saving a line.
+    const latDelta = radiusM / 111_320;
+    const lngDelta = radiusM / (111_320 * Math.cos((center.lat * Math.PI) / 180));
+
+    const params = new URLSearchParams({
+      q: phrase,
+      format: "jsonv2",
+      limit: String(input.maxResults ?? 15),
+      addressdetails: "1",
+      bounded: "1",
+      viewbox: [
+        center.lng - lngDelta,
+        center.lat + latDelta,
+        center.lng + lngDelta,
+        center.lat - latDelta,
+      ].join(","),
+      countrycodes: this.countryCodes,
+    });
+
+    const results = await throttledFetchJson<NominatimPlace[]>(
+      `${BASE}/search?${params.toString()}`,
+      { minIntervalMs: MIN_INTERVAL_MS },
+    ).catch(() => [] as NominatimPlace[]);
+
+    /*
+     * Only rows with a real `name` survive.
+     *
+     * This filters on the raw field rather than the derived one, and the
+     * distinction is not pedantic. `toName` falls back to the first segment of
+     * `display_name`, which for an unnamed POI is the *street* — so an
+     * unnamed pharmacy came back as "Gana Street", and the assistant duly
+     * announced "Nearest pharmacy: Gana Street, 170 m away".
+     *
+     * That is worse than returning nothing: it is a confident, specific,
+     * wrong answer, which is the one failure this product cannot afford. An
+     * unnamed node also cannot be said aloud to a driver or recognised in a
+     * list, so it has no value here even when it is real.
+     */
+    const named = results
+      .filter((place) => Boolean(place.name?.trim()))
+      .flatMap(toPlaceResult);
+
+    if (named.length === 0) return this.nearby.nearbySearch(input);
+
+    return named;
   }
 }

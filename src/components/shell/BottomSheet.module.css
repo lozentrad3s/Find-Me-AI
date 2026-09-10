@@ -1,0 +1,91 @@
+/* Draggable bottom sheet with snap detents.
+   The dominant container pattern for map apps — Google Maps and Apple Maps
+   both put their entire secondary interface in one, because it keeps content
+   near the thumb without ever fully hiding the map. */
+
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.7);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.7);
+  border-top: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow: var(--shadow-lg);
+  /* Height is driven by transform, so the sheet is always full-height and
+     simply slides — animating height instead would relayout its contents on
+     every frame of the drag. */
+  height: 100dvh;
+  will-change: transform;
+  touch-action: none;
+}
+
+/* Only animate when the finger is off. During a drag the transform must track
+   the pointer exactly or the sheet feels like it is lagging behind. */
+.sheet[data-dragging="false"] {
+  transition: transform 380ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@media (min-width: 768px) {
+  .sheet {
+    left: var(--space-4);
+    right: auto;
+    width: 400px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--glass-border);
+  }
+}
+
+/* --- grab handle ---------------------------------------------------------- */
+
+.handleArea {
+  flex-shrink: 0;
+  padding: 10px 0 6px;
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  /* Generous hit area — the visible bar is only 4px tall. */
+  min-height: 28px;
+}
+
+.handleArea:active {
+  cursor: grabbing;
+}
+
+.handle {
+  width: 40px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--fg-subtle);
+  opacity: 0.45;
+  transition: opacity var(--dur-fast) var(--ease), width var(--dur-fast) var(--ease);
+}
+
+.handleArea:hover .handle {
+  opacity: 0.7;
+  width: 52px;
+}
+
+/* --- content -------------------------------------------------------------- */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Restore normal scrolling inside; the sheet itself owns the drag gesture. */
+  touch-action: pan-y;
+  padding-bottom: calc(var(--space-6) + env(safe-area-inset-bottom, 0));
+}
+
+/* At peek height the body must not scroll, or a drag upward scrolls the
+   content instead of opening the sheet. */
+.sheet[data-detent="peek"] .body {
+  overflow: hidden;
+  touch-action: none;
+}

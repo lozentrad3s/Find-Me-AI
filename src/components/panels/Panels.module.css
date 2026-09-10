@@ -1,0 +1,349 @@
+/* Shared styles for the sheet panels: Home, Explore, Trips, Profile. */
+
+.panel {
+  padding: 0 var(--space-4) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.greeting {
+  padding-top: var(--space-1);
+}
+
+.greetingTitle {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0 0 2px;
+}
+
+.greetingSub {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--fg-muted);
+}
+
+/* --- search launcher ------------------------------------------------------ */
+
+.searchBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 12px var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--fg-subtle);
+  font-size: 14.5px;
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.searchBar:hover {
+  border-color: var(--brand-blue);
+  box-shadow: var(--shadow-md);
+}
+
+.searchIcon {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.searchMic {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--ai-gradient);
+  color: #fff;
+  flex-shrink: 0;
+}
+
+/* --- weather -------------------------------------------------------------- */
+
+.weatherCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  /* Warm-cool wash rather than a flat fill: it reads as sky without needing
+     an image, and it is the one place a gradient earns its keep on this
+     screen. */
+  background: var(--ai-gradient-soft);
+  border: 1px solid var(--border-soft);
+}
+
+.weatherTop {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.weatherIcon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--primary);
+  flex-shrink: 0;
+  box-shadow: var(--shadow-sm);
+}
+
+.weatherTemp {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.weatherDesc {
+  font-size: 13px;
+  color: var(--fg-muted);
+  margin-top: 3px;
+}
+
+.weatherPlace {
+  margin-left: auto;
+  text-align: right;
+  font-size: 12px;
+  color: var(--fg-subtle);
+  max-width: 45%;
+}
+
+.forecastRow {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--space-1);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.forecastDay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.forecastLabel {
+  font-weight: 550;
+  color: var(--fg-subtle);
+}
+
+.forecastTemp {
+  font-weight: 600;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.rainChance {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--brand-blue);
+  font-weight: 550;
+}
+
+/* An advisory is an interruption, so it looks like one — but amber, never
+   red. Red belongs to SOS. */
+.advisory {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--band-moderate-soft);
+  color: var(--band-moderate);
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-weight: 500;
+}
+
+/* --- quick actions -------------------------------------------------------- */
+
+.sectionTitle {
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-subtle);
+  margin: 0 0 var(--space-2);
+}
+
+.actionGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2);
+}
+
+.action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-3) 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 11.5px;
+  font-weight: 550;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.action:hover {
+  transform: translateY(-2px);
+  border-color: var(--brand-blue);
+  box-shadow: var(--shadow-md);
+}
+
+.actionIcon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  color: #fff;
+}
+
+/* --- category grid (Explore) ---------------------------------------------- */
+
+.categoryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2);
+}
+
+/* --- place list ----------------------------------------------------------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.placeRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 10px var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.placeRow:hover {
+  border-color: var(--brand-blue);
+  transform: translateX(2px);
+}
+
+.placeIcon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-soft);
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.placeText {
+  min-width: 0;
+  flex: 1;
+}
+
+.placeName {
+  font-size: 14px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.placeMeta {
+  font-size: 12px;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.placeDistance {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+/* --- states --------------------------------------------------------------- */
+
+.empty {
+  padding: var(--space-5) var(--space-3);
+  text-align: center;
+  color: var(--fg-subtle);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.skeleton {
+  height: 58px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    90deg,
+    var(--surface-sunken) 25%,
+    var(--border-soft) 50%,
+    var(--surface-sunken) 75%
+  );
+  background-size: 200% 100%;
+  animation: fm-shimmer 1.4s linear infinite;
+}
+
+@keyframes fm-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.sosButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-4);
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--danger);
+  color: var(--on-danger);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  box-shadow: 0 8px 24px -8px rgb(239 68 68 / 0.6);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.sosButton:active {
+  transform: scale(0.98);
+}

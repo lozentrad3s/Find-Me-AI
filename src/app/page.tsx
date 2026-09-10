@@ -3,34 +3,53 @@
 /**
  * Find Me — the app shell.
  *
- * Map-first, per the design philosophy in Part 2.3: the map is the page, and
- * everything else floats over it. The assistant is the primary control, not a
- * feature tucked behind a button.
+ * Map-first, per the design philosophy: the map is the page and everything
+ * else floats over it in a bottom sheet, which is the pattern both Google Maps
+ * and Apple Maps converged on. It keeps content in thumb reach without ever
+ * fully hiding where you are.
  *
- * Map state is derived from tool results rather than from anything the model
- * says. A pin only appears because `resolve_place` returned coordinates; a
- * route is only drawn because OSRM returned geometry. If the model hallucinated
- * a place, nothing would move — which is the property we want.
+ * The invariant worth protecting: map state is derived from tool and API
+ * results, never from anything the model says. A pin appears because
+ * coordinates came back; a route is drawn because OSRM returned geometry. If
+ * the assistant hallucinated a place, nothing on the map would move.
  */
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Crosshair, Loader2, Moon, Sun } from "lucide-react";
+import { Crosshair, Loader2, Shield } from "lucide-react";
 
 import Assistant, { type ChatTurn, type TraceItem } from "@/components/Assistant";
 import VoiceOverlay, { type VoiceState } from "@/components/VoiceOverlay";
+import BottomSheet, { type Detent } from "@/components/shell/BottomSheet";
+import BottomNav, { type TabId } from "@/components/shell/BottomNav";
+import HomePanel from "@/components/panels/HomePanel";
+import ExplorePanel, { type NearbyPlace } from "@/components/panels/ExplorePanel";
+import {
+  ProfilePanel,
+  SafetyPanel,
+  TripsPanel,
+} from "@/components/panels/SimplePanels";
 import type { MapMarker } from "@/components/MapView";
 import type { LatLng } from "@/lib/geo/distance";
+import type { WeatherReport } from "@/lib/weather/open-meteo";
 import { useVoice } from "@/lib/voice/useVoice";
+import { DEFAULT_CITY } from "@/lib/geo/cities";
+import {
+  addRecentPlace,
+  clearRecentPlaces,
+  getRecentPlaces,
+  getSavedPlaces,
+  type RecentPlace,
+  type StoredPlace,
+} from "@/lib/storage/places";
 
 // Leaflet touches `window` on import, so it must never be server-rendered.
 const MapView = dynamic(() => import("@/components/MapView"), {
   ssr: false,
-  loading: () => <div style={{ width: "100%", height: "100%", background: "var(--surface-sunken)" }} />,
+  loading: () => (
+    <div style={{ width: "100%", height: "100%", background: "var(--surface-sunken)" }} />
+  ),
 });
-
-/** Abuja city centre — a sensible view before permission is granted. */
-const FALLBACK_CENTRE: LatLng = { lat: 9.0765, lng: 7.3986 };
 
 type Theme = "light" | "dark";
 
@@ -38,56 +57,67 @@ interface ResolveResultShape {
   band?: "high" | "moderate" | "low";
   best?: { name?: string; address?: string; lat?: number; lng?: number } | null;
 }
-
 interface NearbyResultShape {
   results?: Array<{ name?: string; address?: string | null; lat?: number; lng?: number }>;
 }
-
 interface RouteResultShape {
   geometry?: string | null;
 }
 
 export default function Home() {
+  // --- conversation -------------------------------------------------------
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [busy, setBusy] = useState(false);
   const [liveTrace, setLiveTrace] = useState<TraceItem[]>([]);
+  const [liveReply, setLiveReply] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [usage, setUsage] = useState<UsageShape | null>(null);
 
+  // --- shell --------------------------------------------------------------
+  const [tab, setTab] = useState<TabId>("home");
+  const [detent, setDetent] = useState<Detent>("half");
+  const [chatOpen, setChatOpen] = useState(false);
+
+  // --- location and map ---------------------------------------------------
   const [location, setLocation] = useState<LatLng | null>(null);
   const [locating, setLocating] = useState(false);
-  const [locationLabel, setLocationLabel] = useState("Location not shared");
-
+  const [locationLabel, setLocationLabel] = useState("Abuja");
   const [markers, setMarkers] = useState<MapMarker[]>([]);
   const [routeGeometry, setRouteGeometry] = useState<string | null>(null);
   const [focus, setFocus] = useState<LatLng | null>(null);
 
+  // --- data ---------------------------------------------------------------
+  const [weather, setWeather] = useState<WeatherReport | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(true);
+  const [nearby, setNearby] = useState<NearbyPlace[]>([]);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [recents, setRecents] = useState<RecentPlace[]>([]);
+  const [saved, setSaved] = useState<StoredPlace[]>([]);
+
+  // --- prefs --------------------------------------------------------------
   const [theme, setTheme] = useState<Theme>("light");
   const [speakReplies, setSpeakReplies] = useState(false);
-  const [usage, setUsage] = useState<UsageShape | null>(null);
-
-  // --- voice conversation -------------------------------------------------
   const [voiceOpen, setVoiceOpen] = useState(false);
-  const [liveReply, setLiveReply] = useState("");
   const [lastQuestion, setLastQuestion] = useState<string | null>(null);
 
-  // Read inside callbacks that must not re-subscribe on every render.
+  // Refs for callbacks that must not re-subscribe on every render.
+  const turnsRef = useRef<ChatTurn[]>([]);
+  turnsRef.current = turns;
   const voiceOpenRef = useRef(false);
   voiceOpenRef.current = voiceOpen;
   const busyRef = useRef(false);
   busyRef.current = busy;
+  const locationRef = useRef<LatLng | null>(null);
+  locationRef.current = location;
 
-  // Held in a ref so the send handler never closes over a stale conversation.
-  const turnsRef = useRef<ChatTurn[]>([]);
-  turnsRef.current = turns;
-
-  // --- theme --------------------------------------------------------------
+  // --- boot ---------------------------------------------------------------
 
   useEffect(() => {
     const stored = (() => {
       try {
         return window.localStorage.getItem("fm-theme") as Theme | null;
       } catch {
-        // Private mode and blocked site data both throw here.
         return null;
       }
     })();
@@ -98,6 +128,9 @@ export default function Home() {
 
     setTheme(initial);
     document.documentElement.dataset.theme = initial;
+
+    setRecents(getRecentPlaces());
+    setSaved(getSavedPlaces());
   }, []);
 
   const toggleTheme = useCallback(() => {
@@ -107,11 +140,35 @@ export default function Home() {
       try {
         window.localStorage.setItem("fm-theme", next);
       } catch {
-        /* not important enough to surface */
+        /* not worth surfacing */
       }
       return next;
     });
   }, []);
+
+  // --- weather ------------------------------------------------------------
+
+  useEffect(() => {
+    const point = location ?? DEFAULT_CITY.centre;
+    let cancelled = false;
+
+    setWeatherLoading(true);
+
+    fetch(`/api/weather?lat=${point.lat}&lng=${point.lng}`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: unknown) => {
+        if (cancelled || !data) return;
+        setWeather(data as WeatherReport);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setWeatherLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [location]);
 
   // --- location -----------------------------------------------------------
 
@@ -133,9 +190,9 @@ export default function Home() {
         setFocus(point);
         setLocating(false);
         setLocationLabel(
-          `${point.lat.toFixed(4)}, ${point.lng.toFixed(4)} · ±${Math.round(
+          `${point.lat.toFixed(3)}, ${point.lng.toFixed(3)} · ±${Math.round(
             position.coords.accuracy,
-          )} m`,
+          )}m`,
         );
         setNotice(null);
       },
@@ -143,8 +200,8 @@ export default function Home() {
         setLocating(false);
         setNotice(
           error.code === error.PERMISSION_DENIED
-            ? "Location permission was denied. You can still search and ask about places by name."
-            : "Could not get a location fix. You can still search by name.",
+            ? "Location permission denied. You can still search by name."
+            : "Could not get a fix. You can still search by name.",
         );
       },
       { enableHighAccuracy: true, timeout: 12_000, maximumAge: 30_000 },
@@ -158,10 +215,8 @@ export default function Home() {
       setLastQuestion(transcript);
       void send(transcript);
     },
-    // Closes the hands-free loop: when the spoken reply ends, listen again —
-    // but only while the overlay is open, so the panel's mic button stays a
-    // one-shot control rather than silently becoming always-on.
     onSpeechEnd: () => {
+      // Re-arm only while the overlay is open, so the panel mic stays one-shot.
       if (voiceOpenRef.current && !busyRef.current) {
         window.setTimeout(() => {
           if (voiceOpenRef.current && !busyRef.current) voice.start();
@@ -178,6 +233,8 @@ export default function Home() {
       if (!trimmed || busy) return;
 
       voice.stopSpeaking();
+      setChatOpen(true);
+      setDetent("full");
       setNotice(null);
       setLiveTrace([]);
       setLiveReply("");
@@ -198,8 +255,9 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             messages: outgoing.map(({ role, content }) => ({ role, content })),
-            lat: location?.lat,
-            lng: location?.lng,
+            lat: locationRef.current?.lat,
+            lng: locationRef.current?.lng,
+            city: DEFAULT_CITY.id,
           }),
         });
 
@@ -222,8 +280,6 @@ export default function Home() {
 
           buffer += decoder.decode(value, { stream: true });
 
-          // SSE frames are separated by a blank line. A partial frame stays in
-          // the buffer until the rest of it arrives.
           const frames = buffer.split("\n\n");
           buffer = frames.pop() ?? "";
 
@@ -252,6 +308,11 @@ export default function Home() {
                   setMarkers,
                   setRouteGeometry,
                   setFocus,
+                  rememberPlace: (place) => {
+                    setRecents(
+                      addRecentPlace({ ...place, phrase: trimmed }),
+                    );
+                  },
                 });
                 if (band) {
                   const last = trace[trace.length - 1];
@@ -259,7 +320,7 @@ export default function Home() {
                   setLiveTrace([...trace]);
                 }
               },
-              onUsage: (usage) => setUsage(usage),
+              onUsage: (value) => setUsage(value),
               onError: (message) => setNotice(message),
             });
           }
@@ -280,49 +341,77 @@ export default function Home() {
             },
           ]);
 
-          // The overlay is a spoken interface by definition, so it always
-          // reads replies back; the panel respects the toggle.
           if (speakReplies || voiceOpenRef.current) {
             voice.speak(assistantText.trim());
           }
         }
       }
     },
-    [busy, location, speakReplies, voice],
+    [busy, speakReplies, voice],
   );
 
-  // --- map ----------------------------------------------------------------
+  // --- explore ------------------------------------------------------------
 
-  const allMarkers = useMemo<MapMarker[]>(() => {
-    const userMarker: MapMarker[] = location
-      ? [{ id: "user", point: location, label: "You are here", kind: "user" }]
-      : [];
-    return [...userMarker, ...markers];
-  }, [location, markers]);
+  const loadNearby = useCallback(
+    async (category: string, label: string) => {
+      const point = location ?? DEFAULT_CITY.centre;
 
-  const centre = location ?? FALLBACK_CENTRE;
+      setActiveCategory(label);
+      setNearbyLoading(true);
 
-  /*
-   * The overlay's state is derived rather than stored.
-   *
-   * Keeping a separate copy in state guarantees it eventually disagrees with
-   * whether the microphone is actually open — and a listening animation over a
-   * closed mic is the single most confusing thing a voice UI can do.
-   */
-  const voiceState: VoiceState = busy
-    ? "thinking"
-    : voice.speaking
-      ? "speaking"
-      : voice.listening
-        ? "listening"
-        : "idle";
+      try {
+        const params = new URLSearchParams({
+          lat: String(point.lat),
+          lng: String(point.lng),
+        });
+        if (category) params.set("category", category);
+
+        const response = await fetch(`/api/nearby?${params.toString()}`);
+        const data = (await response.json()) as {
+          places?: Array<{
+            name: string;
+            address: string | null;
+            point: LatLng;
+            distanceM: number;
+          }>;
+        };
+
+        const places = data.places ?? [];
+        setNearby(places);
+
+        setMarkers(
+          places.slice(0, 12).map((place, index) => ({
+            id: `nearby-${index}`,
+            point: place.point,
+            label: place.name,
+            detail: place.address ?? undefined,
+            kind: "result" as const,
+          })),
+        );
+
+        const first = places[0];
+        if (first) setFocus(first.point);
+      } catch {
+        setNearby([]);
+      } finally {
+        setNearbyLoading(false);
+      }
+    },
+    [location],
+  );
+
+  // --- map helpers --------------------------------------------------------
+
+  const openPlace = useCallback((point: LatLng, name: string) => {
+    setMarkers([{ id: `place-${name}`, point, label: name, kind: "route-end" }]);
+    setFocus(point);
+    setDetent("peek");
+  }, []);
 
   const openVoice = useCallback(() => {
     setVoiceOpen(true);
     setLastQuestion(null);
     setLiveReply("");
-    // Open the mic immediately: the user tapped a microphone, so making them
-    // tap a second one inside the overlay is a wasted step.
     if (voice.supported) voice.start();
   }, [voice]);
 
@@ -331,6 +420,45 @@ export default function Home() {
     voice.stop();
     voice.stopSpeaking();
   }, [voice]);
+
+  const shareLocation = useCallback(() => {
+    const point = locationRef.current;
+    if (!point) {
+      setNotice("Share your location first so there is something to send.");
+      return;
+    }
+
+    const text = `I'm here: https://www.openstreetmap.org/?mlat=${point.lat}&mlon=${point.lng}#map=18/${point.lat}/${point.lng}`;
+
+    if (navigator.share) {
+      void navigator.share({ title: "My location", text }).catch(() => undefined);
+      return;
+    }
+
+    void navigator.clipboard
+      ?.writeText(text)
+      .then(() => setNotice("Location link copied to your clipboard."))
+      .catch(() => setNotice("Could not copy the location link."));
+  }, []);
+
+  // --- derived ------------------------------------------------------------
+
+  const allMarkers = useMemo<MapMarker[]>(() => {
+    const userMarker: MapMarker[] = location
+      ? [{ id: "user", point: location, label: "You are here", kind: "user" }]
+      : [];
+    return [...userMarker, ...markers];
+  }, [location, markers]);
+
+  const voiceState: VoiceState = busy
+    ? "thinking"
+    : voice.speaking
+      ? "speaking"
+      : voice.listening
+        ? "listening"
+        : "idle";
+
+  const centre = location ?? DEFAULT_CITY.centre;
 
   return (
     <main style={{ position: "fixed", inset: 0, overflow: "hidden" }}>
@@ -347,17 +475,13 @@ export default function Home() {
           position: "absolute",
           top: "var(--space-4)",
           right: "var(--space-4)",
-          zIndex: 500,
+          zIndex: 550,
           display: "flex",
           flexDirection: "column",
           gap: "var(--space-2)",
         }}
       >
-        <FloatingButton
-          onClick={locate}
-          title={location ? "Recentre on your location" : "Share your location"}
-          active={Boolean(location)}
-        >
+        <FloatingButton onClick={locate} title="My location" active={Boolean(location)}>
           {locating ? (
             <Loader2 size={18} style={{ animation: "fm-spin 0.8s linear infinite" }} />
           ) : (
@@ -366,30 +490,106 @@ export default function Home() {
         </FloatingButton>
 
         <FloatingButton
-          onClick={toggleTheme}
-          title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+          onClick={() => {
+            setTab("safety");
+            setChatOpen(false);
+            setDetent("half");
+          }}
+          title="Safety and SOS"
+          danger
         >
-          {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+          <Shield size={18} />
         </FloatingButton>
       </div>
 
-      <Assistant
-        turns={turns}
-        busy={busy}
-        liveTrace={liveTrace}
-        notice={notice}
-        voice={voice}
-        speakReplies={speakReplies}
-        onToggleSpeakReplies={() => {
-          setSpeakReplies((value) => {
-            if (value) voice.stopSpeaking();
-            return !value;
-          });
+      <BottomSheet detent={detent} onDetentChange={setDetent} label="Find Me panel">
+        {chatOpen ? (
+          <Assistant
+            turns={turns}
+            busy={busy}
+            liveTrace={liveTrace}
+            notice={notice}
+            voice={voice}
+            speakReplies={speakReplies}
+            onToggleSpeakReplies={() => {
+              setSpeakReplies((value) => {
+                if (value) voice.stopSpeaking();
+                return !value;
+              });
+            }}
+            onSend={(text) => void send(text)}
+            locationLabel={locationLabel}
+            usage={usage}
+            onOpenVoice={openVoice}
+            onClose={() => setChatOpen(false)}
+            embedded
+          />
+        ) : tab === "home" ? (
+          <HomePanel
+            locationLabel={locationLabel}
+            weather={weather}
+            weatherLoading={weatherLoading}
+            recents={recents}
+            saved={saved}
+            userLocation={location}
+            onSearch={() => {
+              setChatOpen(true);
+              setDetent("full");
+            }}
+            onVoice={openVoice}
+            onAsk={(phrase) => void send(phrase)}
+            onOpenPlace={openPlace}
+          />
+        ) : tab === "explore" ? (
+          <ExplorePanel
+            userLocation={location}
+            results={nearby}
+            loading={nearbyLoading}
+            activeCategory={activeCategory}
+            onCategory={(category, label) => void loadNearby(category, label)}
+            onOpenPlace={openPlace}
+          />
+        ) : tab === "trips" ? (
+          <TripsPanel
+            recents={recents}
+            saved={saved}
+            userLocation={location}
+            onOpenPlace={openPlace}
+            onClearRecents={() => {
+              clearRecentPlaces();
+              setRecents([]);
+            }}
+          />
+        ) : tab === "safety" ? (
+          <SafetyPanel
+            locationLabel={locationLabel}
+            onSos={shareLocation}
+            onShareLocation={shareLocation}
+          />
+        ) : (
+          <ProfilePanel
+            theme={theme}
+            onToggleTheme={toggleTheme}
+            speakReplies={speakReplies}
+            onToggleSpeak={() => setSpeakReplies((value) => !value)}
+            savedCount={saved.length}
+            recentCount={recents.length}
+          />
+        )}
+      </BottomSheet>
+
+      <BottomNav
+        active={tab}
+        onChange={(next) => {
+          setTab(next);
+          setChatOpen(false);
+          setDetent("half");
+          if (next === "explore" && nearby.length === 0 && !nearbyLoading) {
+            void loadNearby("", "Nearby");
+          }
         }}
-        onSend={(text) => void send(text)}
-        locationLabel={locationLabel}
-        usage={usage}
-        onOpenVoice={openVoice}
+        onVoice={openVoice}
+        listening={voice.listening}
       />
 
       <VoiceOverlay
@@ -419,11 +619,13 @@ function FloatingButton({
   onClick,
   title,
   active = false,
+  danger = false,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   title: string;
   active?: boolean;
+  danger?: boolean;
 }) {
   return (
     <button
@@ -441,8 +643,11 @@ function FloatingButton({
         WebkitBackdropFilter: "blur(var(--glass-blur))",
         border: "1px solid var(--glass-border)",
         boxShadow: "var(--shadow-md)",
-        color: active ? "var(--primary)" : "var(--fg-muted)",
-        transition: "color var(--dur-fast) var(--ease)",
+        color: danger
+          ? "var(--danger)"
+          : active
+            ? "var(--primary)"
+            : "var(--fg-muted)",
       }}
     >
       {children}
@@ -504,9 +709,8 @@ function handleEvent(
 /**
  * Turn a tool result into map state.
  *
- * Returns the confidence band when the tool reports one, so the UI can show it
- * beside the tool chip — the user should be able to see that the engine was
- * unsure, not just read a hedged sentence.
+ * Returns the confidence band when one is reported, so the UI can show that
+ * the engine was unsure rather than leaving it buried in a hedged sentence.
  */
 function applyToolResult(
   name: string,
@@ -515,6 +719,11 @@ function applyToolResult(
     setMarkers: (markers: MapMarker[]) => void;
     setRouteGeometry: (geometry: string | null) => void;
     setFocus: (point: LatLng | null) => void;
+    rememberPlace: (place: {
+      name: string;
+      address: string;
+      point: LatLng;
+    }) => void;
   },
 ): "high" | "moderate" | "low" | undefined {
   if (typeof result !== "object" || result === null) return undefined;
@@ -535,6 +744,16 @@ function applyToolResult(
         },
       ]);
       setters.setFocus(point);
+
+      // Only remember confident answers. Recording a guess would put a wrong
+      // place in the user's history and then offer it back to them later.
+      if (payload.band === "high") {
+        setters.rememberPlace({
+          name: best.name ?? "Place",
+          address: best.address ?? "",
+          point,
+        });
+      }
     }
 
     return payload.band;
@@ -563,11 +782,12 @@ function applyToolResult(
     return undefined;
   }
 
-  if (name === "calculate_route") {
-    const payload = result as RouteResultShape;
-    if (typeof payload.geometry === "string") {
-      setters.setRouteGeometry(payload.geometry);
-    }
+  if (name === "calculate_route" || name === "check_route_conditions") {
+    const payload = result as RouteResultShape & {
+      primary_route?: { geometry?: string | null };
+    };
+    const geometry = payload.geometry ?? payload.primary_route?.geometry;
+    if (typeof geometry === "string") setters.setRouteGeometry(geometry);
     return undefined;
   }
 

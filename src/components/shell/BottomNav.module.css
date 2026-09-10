@@ -1,0 +1,113 @@
+/* Five-tab bar with a raised centre voice control — the shell from the design
+   reference. Five is the practical ceiling for a bottom bar; past that the
+   targets get too narrow to hit reliably. */
+
+.nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 700;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  align-items: end;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-2)
+    calc(var(--space-2) + env(safe-area-inset-bottom, 0));
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.7);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.7);
+  border-top: 1px solid var(--glass-border);
+}
+
+@media (min-width: 768px) {
+  .nav {
+    left: var(--space-4);
+    right: auto;
+    bottom: var(--space-4);
+    width: 400px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--shadow-md);
+  }
+}
+
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  /* 44px min target height, per the touch rules. */
+  min-height: 48px;
+  padding: 6px 2px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-subtle);
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.tab:hover {
+  color: var(--fg-muted);
+}
+
+.tab[data-active="true"] {
+  color: var(--primary);
+}
+
+.tabLabel {
+  font-size: 10.5px;
+  font-weight: 550;
+  letter-spacing: -0.01em;
+}
+
+/* A small dot rather than a filled pill: the map is the subject, and a heavy
+   active state competes with it. */
+.tabDot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.tab[data-active="true"] .tabDot {
+  opacity: 1;
+}
+
+/* --- centre voice control ------------------------------------------------- */
+
+.voiceSlot {
+  display: grid;
+  place-items: center;
+  /* Lifted above the bar so it reads as the primary action, matching the
+     reference. */
+  transform: translateY(-14px);
+}
+
+.voice {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border: 3px solid var(--surface);
+  border-radius: 50%;
+  background: var(--ai-gradient);
+  color: #fff;
+  box-shadow: 0 8px 22px -6px rgb(59 130 246 / 0.65);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.voice:hover {
+  transform: scale(1.06);
+}
+
+.voice:active {
+  transform: scale(0.95);
+}
+
+.voice[data-listening="true"] {
+  animation: fm-pulse-ring 1.6s var(--ease) infinite;
+}

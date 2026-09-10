@@ -95,7 +95,16 @@
   --space-6: 32px;
   --space-7: 48px;
 
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Canonical curves, not approximations of them. The built-in CSS easings
+     are too weak for UI; these are the strong versions. --ease-drawer is the
+     iOS drawer curve, which is why the bottom sheet uses it. */
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Button feedback 100-160ms, dropdowns 150-250ms. UI motion stays under
+     300ms — a 180ms panel feels more responsive than a 400ms one. */
   --dur-fast: 140ms;
   --dur: 220ms;
 }
@@ -326,16 +335,54 @@ textarea {
   }
 }
 
-/* Motion conveys state here (listening, thinking), so when it is switched off
-   the state must still be legible — the UI keeps text labels in every case. */
+/*
+ * Reduced motion: fewer and gentler, not zero.
+ *
+ * Blanket-killing every transition is the reflex, and it is slightly wrong —
+ * it removes the fades and colour changes that help people follow what
+ * changed, alongside the movement that actually causes discomfort. What has to
+ * go is *position and scale* change. Opacity and colour can stay, faster.
+ *
+ * Motion also carries state here (listening, thinking, speaking), so the UI
+ * keeps a text label in every one of those states rather than relying on the
+ * animation to communicate.
+ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
+    /* Looping, movement-based animations are the ones that cause trouble. */
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    /* Transitions survive, but quickly. */
+    transition-duration: 80ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* Kill translate/scale hover lifts specifically; colour and border remain. */
+  .fm-no-motion-transform,
+  [class*="action"]:hover,
+  [class*="placeRow"]:hover,
+  [class*="suggestion"]:hover {
+    transform: none !important;
+  }
+}
+
+/*
+ * Hover effects are gated to real pointers.
+ *
+ * A touch tap fires :hover and then leaves it applied, so a card that lifts on
+ * hover stays lifted after a tap on a phone — which looks like a stuck
+ * selection rather than a hover. This query is the fix, and it ships with the
+ * hover rather than after it.
+ */
+@media (hover: none) {
+  [class*="action"]:hover,
+  [class*="placeRow"]:hover,
+  [class*="suggestion"]:hover,
+  [class*="searchBar"]:hover {
+    transform: none;
+    box-shadow: var(--shadow-sm);
   }
 }
 

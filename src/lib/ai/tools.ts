@@ -29,6 +29,7 @@ import {
 } from "@/lib/routing/osrm";
 import { decodePolyline } from "@/lib/geo/polyline";
 import { NoTrafficProvider, type TrafficProvider } from "@/lib/traffic/types";
+import { getWeather } from "@/lib/weather/open-meteo";
 
 export type RiskTier = "read" | "write" | "notify" | "emergency" | "financial";
 
@@ -361,6 +362,46 @@ const routeConditionsTool: AgentTool = {
   },
 };
 
+const weatherTool: AgentTool = {
+  name: "get_weather",
+  tier: "read",
+  description:
+    "Current conditions and a five-day forecast for a point, defaulting to the user's location. Use this for any question about weather, rain, heat or whether to set off now. Also worth calling unprompted when the user is planning a journey and `travel_advisory` would change their decision — in Abuja's rainy season a downpour is a real routing factor, not small talk.",
+  input_schema: {
+    type: "object",
+    properties: {
+      lat: { type: "number", description: "Latitude. Defaults to the user." },
+      lng: { type: "number", description: "Longitude. Defaults to the user." },
+    },
+  },
+  async execute(input, context) {
+    const point = readPoint(input, context);
+    if (!point) return NO_LOCATION;
+
+    const report = await getWeather(point);
+    if (!report) return { error: "Weather data is unavailable right now." };
+
+    return {
+      current: {
+        temperature_c: Math.round(report.current.temperatureC),
+        feels_like_c: Math.round(report.current.feelsLikeC),
+        conditions: report.current.description,
+        humidity_pct: report.current.humidityPct,
+        wind_kph: Math.round(report.current.windKph),
+      },
+      forecast: report.daily.map((day) => ({
+        day: day.label,
+        conditions: day.description,
+        high_c: Math.round(day.maxC),
+        low_c: Math.round(day.minC),
+        rain_chance_pct: day.rainChancePct,
+      })),
+      // Present only when it is worth mentioning; say it plainly when it is.
+      travel_advisory: report.travelAdvisory,
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -371,6 +412,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   whereAmITool,
   routeTool,
   routeConditionsTool,
+  weatherTool,
 ];
 
 export const TOOLS_BY_NAME = new Map(
