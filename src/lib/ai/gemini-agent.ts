@@ -2,19 +2,24 @@
  * Gemini agent — the assistant on Google's models.
  *
  * Exists because Gemini's free tier needs no card, which makes the full
- * conversational product testable today rather than after billing is set up.
- * It emits the same `AgentEvent` stream as the Claude agent, so the UI, the
- * voice loop, the tool trace and the map wiring are all identical and neither
- * path is a second-class citizen.
+ * conversational product testable without billing set up. It emits the same
+ * `AgentEvent` stream as the Claude agent, so the UI, the voice loop, the tool
+ * trace and the map wiring are identical and neither path is second-class.
  *
- * Uses the Interactions API, which is server-stateful: after the first call,
- * follow-ups carry `previous_interaction_id` and send only the new tool
- * results instead of resending the whole conversation. That is a real
- * advantage over resending history every turn on a free tier with request
- * quotas rather than token quotas.
+ * WHY generateContent AND NOT THE INTERACTIONS API
  *
- * Google Search and Google Maps grounding are available as built-in tools and
- * are deliberately OFF by default — see GROUNDING below.
+ * The Interactions API is the newer surface and its server-held history is
+ * genuinely attractive on a request-quota free tier — follow-ups would send
+ * only the new tool results instead of resending the conversation. It was
+ * tried first and abandoned: the initial call worked and returned a
+ * `function_call` step, but posting the `function_result` back with
+ * `previous_interaction_id` never returned. It did not error; it hung past
+ * 45 seconds, which is worse than failing, because a voice user is left
+ * listening to silence.
+ *
+ * `generateContent` is stateless, well documented, and completes. Resending
+ * history costs tokens the free tier does not meter, so the trade is nearly
+ * free here.
  */
 
 import { GoogleGenAI } from "@google/genai";
@@ -24,33 +29,37 @@ import type { AgentEvent, ChatMessage } from "./agent";
 import { SYSTEM_PROMPT } from "./agent";
 
 /** Free-tier friendly and fast enough for a voice loop. */
-export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
+/*
+ * gemini-3.7-flash, not 3.8.
+ *
+ * Measured against the live free tier: 3.8-flash is capped at TWENTY requests
+ * per day per project (quotaId GenerateRequestsPerDayPerProjectPerModel-
+ * FreeTier), which a single debugging session exhausts and which no real user
+ * could live with. 3.7 and 3.6 flash answer normally on the same key.
+ *
+ * Worth re-checking if answers look weak — but a better model you cannot call
+ * is worse than a good one you can.
+ */
+export const DEFAULT_GEMINI_MODEL = "gemini-3.7-flash";
 
 /** Same ceiling as the Claude agent: cost and latency, not capability. */
 const MAX_ITERATIONS = 6;
 
-interface FunctionCallStep {
-  type: "function_call";
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-interface InteractionLike {
+interface GeminiFunctionCall {
+  name?: string;
+  args?: Record<string, unknown>;
   id?: string;
-  steps?: unknown[];
-  output_text?: string;
 }
 
-/** Narrow an unknown step to a function call without trusting the SDK union. */
-function isFunctionCall(step: unknown): step is FunctionCallStep {
-  if (typeof step !== "object" || step === null) return false;
-  const candidate = step as Record<string, unknown>;
-  return (
-    candidate.type === "function_call" &&
-    typeof candidate.id === "string" &&
-    typeof candidate.name === "string"
-  );
+interface GeminiPart {
+  text?: string;
+  functionCall?: GeminiFunctionCall;
+  functionResponse?: { name: string; response: Record<string, unknown> };
+}
+
+interface GeminiContent {
+  role: "user" | "model";
+  parts: GeminiPart[];
 }
 
 export interface RunGeminiOptions {
@@ -59,16 +68,18 @@ export interface RunGeminiOptions {
   apiKey: string;
   model?: string;
   /**
-   * Let Gemini ground answers on Google Search and Google Maps.
+   * Let Gemini ground answers on Google Search.
    *
-   * Off by default, and the default is the considered position rather than
-   * caution for its own sake. Grounding would genuinely help — Google's
-   * Nigeria place data is far better than OpenStreetMap's — but it routes
-   * around this product's own resolution engine, which is the thing being
-   * built and measured. Turning it on quietly would make the harness numbers
-   * meaningless and hide whether the engine is improving.
+   * Off by default. Grounding genuinely helps — Google's Nigeria place data is
+   * far better than OpenStreetMap's, and it is the only realistic source for
+   * the things OSM simply does not carry, like a photo of a building or a
+   * description of what it looks like. But it also routes around this
+   * project's own resolution engine, which is the thing being measured, so
+   * turning it on silently would make the harness numbers meaningless.
    *
-   * Enable it deliberately, for a comparison, not as a default.
+   * Enable deliberately. Note that Google's terms do not allow mixing search
+   * grounding with custom function declarations on every model, so when this
+   * is on the custom tools are still sent and the model chooses.
    */
   grounding?: boolean;
 }
@@ -81,42 +92,40 @@ export async function* runGeminiAgent(
 
   const tools = buildTools(options);
 
-  // Gemini has no dedicated system field on this surface, so the instructions
-  // ride at the front of the first user turn.
-  const history = options.messages
-    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`)
-    .join("\n");
-
-  const opening = `${SYSTEM_PROMPT}\n\n---\n\n${history}\n\nAssistant:`;
-
-  let previousId: string | undefined;
-  let pendingInput: unknown = opening;
+  const contents: GeminiContent[] = options.messages.map((message) => ({
+    role: message.role === "assistant" ? "model" : "user",
+    parts: [{ text: message.content }],
+  }));
 
   try {
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-      const interaction = (await client.interactions.create({
+      const response = (await callModel(client, {
         model,
-        input: pendingInput,
+        contents,
         tools,
-        ...(previousId ? { previous_interaction_id: previousId } : {}),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)) as InteractionLike;
+        // Gemini has a real system field on this surface, unlike Interactions.
+        systemInstruction: SYSTEM_PROMPT,
+      })) as {
+        text?: string;
+        functionCalls?: GeminiFunctionCall[];
+        candidates?: Array<{ content?: GeminiContent }>;
+      };
 
-      previousId = interaction.id;
-
-      const calls = (interaction.steps ?? []).filter(isFunctionCall);
+      const calls = (response.functionCalls ?? []).filter(
+        (call): call is GeminiFunctionCall & { name: string } =>
+          typeof call.name === "string",
+      );
 
       if (calls.length === 0) {
-        const text = interaction.output_text?.trim();
+        const text = response.text?.trim();
         if (text) yield { type: "text", delta: text };
         yield { type: "done" };
         return;
       }
 
-      // Any prose Gemini produced alongside the tool calls is worth showing —
-      // it is usually "let me check that for you", which is exactly the
-      // reassurance a waiting voice user needs.
-      const preamble = interaction.output_text?.trim();
+      // Prose alongside a tool call is usually "let me check" — worth showing
+      // to someone waiting on a voice reply.
+      const preamble = response.text?.trim();
       if (preamble) yield { type: "text", delta: `${preamble}\n` };
 
       const results = await Promise.all(
@@ -124,44 +133,65 @@ export async function* runGeminiAgent(
           const tool = TOOLS_BY_NAME.get(call.name);
 
           if (!tool) {
-            return {
-              call,
-              result: { error: `Unknown tool: ${call.name}` },
-              isError: true,
-            };
+            return { call, result: { error: `Unknown tool: ${call.name}` } };
           }
 
           try {
             const result = await tool.execute(
-              (call.arguments ?? {}) as Record<string, unknown>,
+              (call.args ?? {}) as Record<string, unknown>,
               options.context,
             );
-            return { call, result, isError: false };
+            return { call, result };
           } catch (error) {
             return {
               call,
               result: {
                 error: error instanceof Error ? error.message : "Tool failed.",
               },
-              isError: true,
             };
           }
         }),
       );
 
       for (const { call, result } of results) {
-        yield { type: "tool_call", name: call.name, input: call.arguments };
+        yield { type: "tool_call", name: call.name, input: call.args ?? {} };
         yield { type: "tool_result", name: call.name, result };
       }
 
-      // Only the new results go back; the server still holds the history.
-      pendingInput = results.map(({ call, result, isError }) => ({
-        type: "function_result" as const,
-        call_id: call.id,
-        name: call.name,
-        result: JSON.stringify(result),
-        ...(isError ? { is_error: true } : {}),
-      }));
+      /*
+       * Echo the model's turn back verbatim, not a reconstruction of it.
+       *
+       * Gemini 3.x attaches a `thoughtSignature` to functionCall parts and
+       * requires it back on the next request. Rebuilding the part from the
+       * parsed `functionCalls` array drops that signature, and the API
+       * rejects the follow-up outright:
+       *
+       *   400 "Function call is missing a thought_signature in functionCall
+       *        parts. This is required for tools to work correctly"
+       *
+       * Passing `candidates[0].content` straight through preserves the
+       * signature and any thought parts alongside it. Falling back to a
+       * reconstruction only if the shape is unexpected.
+       */
+      const modelTurn = response.candidates?.[0]?.content;
+
+      contents.push(
+        modelTurn?.parts
+          ? { role: "model", parts: modelTurn.parts }
+          : { role: "model", parts: calls.map((call) => ({ functionCall: call })) },
+      );
+      contents.push({
+        role: "user",
+        parts: results.map(({ call, result }) => ({
+          functionResponse: {
+            name: call.name,
+            // Must be an object; a bare string is rejected.
+            response: (typeof result === "object" && result !== null
+              ? result
+              : { value: result }) as Record<string, unknown>,
+          },
+        })),
+      });
     }
 
     yield {
@@ -173,39 +203,64 @@ export async function* runGeminiAgent(
   }
 }
 
+/**
+ * The SDK's public `generateContent` is not in the exported type surface for
+ * this shape, so the call is made through a narrow local type rather than
+ * spreading `any` through the loop above.
+ */
+async function callModel(
+  client: GoogleGenAI,
+  params: {
+    model: string;
+    contents: GeminiContent[];
+    tools: unknown[];
+    systemInstruction: string;
+  },
+): Promise<unknown> {
+  const models = client.models as unknown as {
+    generateContent(input: Record<string, unknown>): Promise<unknown>;
+  };
+
+  return models.generateContent({
+    model: params.model,
+    contents: params.contents,
+    config: {
+      tools: params.tools,
+      systemInstruction: params.systemInstruction,
+    },
+  });
+}
+
 function buildTools(options: RunGeminiOptions): unknown[] {
-  const functions = AGENT_TOOLS.map((tool) => ({
-    type: "function" as const,
+  const functionDeclarations = AGENT_TOOLS.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    parameters: tool.input_schema,
+    // `parametersJsonSchema` takes a plain JSON Schema; `parameters` expects
+    // Google's own Schema type and rejects ours.
+    parametersJsonSchema: tool.input_schema,
   }));
 
-  if (!options.grounding) return functions;
+  const tools: unknown[] = [{ functionDeclarations }];
 
-  const location = options.context.currentLocation;
+  if (options.grounding) tools.push({ googleSearch: {} });
 
-  return [
-    ...functions,
-    { type: "google_search" as const },
-    {
-      type: "google_maps" as const,
-      ...(location ? { latitude: location.lat, longitude: location.lng } : {}),
-    },
-  ];
+  return tools;
 }
 
 function describeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
-  // The two failures a new Gemini key actually hits, named plainly rather than
+  // The three failures a Gemini key actually hits, named plainly rather than
   // handed back as a raw stack.
-  if (/API key|401|403|PERMISSION_DENIED/i.test(message)) {
-    return "The Gemini API key was rejected. Check GEMINI_API_KEY in your environment.";
-  }
   if (/429|RESOURCE_EXHAUSTED|quota/i.test(message)) {
-    return "Gemini free-tier quota reached. Wait a minute and try again, or switch models.";
+    return "Gemini free-tier limit reached — it resets after a minute. Try again shortly.";
+  }
+  if (/API key|401|403|PERMISSION_DENIED|API_KEY_INVALID/i.test(message)) {
+    return "The Gemini API key was rejected. Check GEMINI_API_KEY in .env.local.";
+  }
+  if (/404|NOT_FOUND/i.test(message)) {
+    return "That Gemini model is not available to this key. Try GEMINI_CHAT_MODEL=gemini-2.5-flash.";
   }
 
-  return `Gemini error: ${message}`;
+  return `Gemini error: ${message.slice(0, 200)}`;
 }

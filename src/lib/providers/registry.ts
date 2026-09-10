@@ -31,7 +31,7 @@ export interface ProviderSelection extends Providers {
 /** Default parse model. Small and cheap — this is a bounded extraction task. */
 const DEFAULT_PARSE_MODEL = "claude-haiku-4-5";
 /** Gemini's free tier needs no card, which is why it is worth supporting. */
-const DEFAULT_GEMINI_PARSE_MODEL = "gemini-3.8-flash";
+const DEFAULT_GEMINI_PARSE_MODEL = "gemini-3.7-flash";
 
 export function buildProviders(
   env: NodeJS.ProcessEnv = process.env,

@@ -103,7 +103,7 @@ export class GeminiLlmProvider implements LlmProvider {
 
   constructor(
     apiKey: string,
-    private readonly model: string = "gemini-3.8-flash",
+    private readonly model: string = "gemini-3.7-flash",
   ) {
     this.client = new GoogleGenAI({ apiKey });
     this.name = `gemini:${model}`;
@@ -130,17 +130,27 @@ export class GeminiLlmProvider implements LlmProvider {
       .join("\n\n");
 
     try {
-      const interaction = (await this.client.interactions.create({
-        model: this.model,
-        input,
-        response_format: {
-          type: "json_schema",
-          json_schema: { name: "parsed_place", schema: PARSED_PLACE_SCHEMA },
-        },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)) as { output_text?: string };
+      /*
+       * generateContent, not the Interactions API.
+       *
+       * Same reason as the agent: the Interactions tool round-trip hung
+       * indefinitely rather than erroring. This surface is stateless, well
+       * documented, and supports a response schema directly.
+       */
+      const models = this.client.models as unknown as {
+        generateContent(input: Record<string, unknown>): Promise<{ text?: string }>;
+      };
 
-      const raw = interaction.output_text?.trim();
+      const response = await models.generateContent({
+        model: this.model,
+        contents: [{ role: "user", parts: [{ text: input }] }],
+        config: {
+          responseMimeType: "application/json",
+          responseJsonSchema: PARSED_PLACE_SCHEMA,
+        },
+      });
+
+      const raw = response.text?.trim();
       if (!raw) return empty(hints.city, "Parser returned nothing.");
 
       const parsed = JSON.parse(raw) as ParsedPlace;

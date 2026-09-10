@@ -141,7 +141,11 @@ export async function scanSurroundings(
   }
   if (features.length === 0) {
     dataGaps.push(
-      "Nothing named is mapped within 400m. This is a gap in OpenStreetMap coverage, not necessarily an empty area.",
+      // Interpolated, never hardcoded. This string said "400m" after the
+      // radius moved to 800m, and the model repeated the wrong figure to the
+      // user verbatim — a fact invented by a stale constant rather than by the
+      // model, which is exactly as misleading.
+      `Nothing named is mapped within ${SCAN_RADIUS_M}m. This is a gap in OpenStreetMap coverage, not necessarily an empty area.`,
     );
   }
   if (!street) {
