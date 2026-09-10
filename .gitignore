@@ -21,3 +21,6 @@ harness-results/
 
 # Installed agent skills (vendored via `npx skills add`)
 .agents/
+
+.vercel
+.vercel
