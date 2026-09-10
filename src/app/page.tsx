@@ -16,7 +16,7 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Crosshair, Loader2, Shield } from "lucide-react";
+import { Crosshair, Loader2, ShieldAlert } from "lucide-react";
 
 import Assistant, { type ChatTurn, type TraceItem } from "@/components/Assistant";
 import VoiceOverlay, { type VoiceState } from "@/components/VoiceOverlay";
@@ -25,11 +25,9 @@ import BottomSheet, { type Detent } from "@/components/shell/BottomSheet";
 import BottomNav, { type TabId } from "@/components/shell/BottomNav";
 import HomePanel from "@/components/panels/HomePanel";
 import ExplorePanel, { type NearbyPlace } from "@/components/panels/ExplorePanel";
-import {
-  ProfilePanel,
-  SafetyPanel,
-  TripsPanel,
-} from "@/components/panels/SimplePanels";
+import { ProfilePanel, TripsPanel } from "@/components/panels/SimplePanels";
+import SafetyCommunity, { useCommunityFeed } from "@/components/panels/SafetyCommunity";
+import { useSosBeacon } from "@/lib/safety/useSosBeacon";
 import type { MapMarker } from "@/components/MapView";
 import type { LatLng } from "@/lib/geo/distance";
 import type { WeatherReport } from "@/lib/weather/open-meteo";
@@ -132,6 +130,14 @@ export default function Home() {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [lastQuestion, setLastQuestion] = useState<string | null>(null);
   const [sosOpen, setSosOpen] = useState(false);
+  /*
+   * The SOS beacon lives here, at the top of the app, and nowhere lower.
+   *
+   * An emergency has to outlive whatever screen started it — closing the SOS
+   * sheet, switching tabs or opening the assistant must never stop the
+   * position reports. Owning it at the root is what guarantees that.
+   */
+  const beacon = useSosBeacon();
   /*
    * How the current turn arrived.
    *
@@ -532,12 +538,46 @@ export default function Home() {
 
   // --- derived ------------------------------------------------------------
 
+  /*
+   * The community feed polls app-wide, not only on the Safety tab.
+   *
+   * An emergency two streets away should reach the map whichever tab someone
+   * happens to be on; making them open Safety to find out defeats the point.
+   */
+  const community = useCommunityFeed(location, true);
+
   const allMarkers = useMemo<MapMarker[]>(() => {
     const userMarker: MapMarker[] = location
       ? [{ id: "user", point: location, label: "You are here", kind: "user" }]
       : [];
-    return [...userMarker, ...markers];
-  }, [location, markers]);
+
+    const ownAlertId = beacon.alert?.id ?? null;
+    const alertMarkers: MapMarker[] = (community.feed?.activeAlerts ?? [])
+      .filter((alert) => alert.id !== ownAlertId && alert.lastFix)
+      .map((alert) => ({
+        id: `alert-${alert.id}`,
+        point: { lat: alert.lastFix!.lat, lng: alert.lastFix!.lng },
+        label: "Emergency nearby",
+        detail: alert.locationDescription ?? "Someone nearby activated SOS. Call 112 if you can help.",
+        kind: "alert" as const,
+      }));
+
+    const incidentMarkers: MapMarker[] = (community.feed?.incidents ?? []).map(
+      (incident) => ({
+        id: `incident-${incident.id}`,
+        point: incident.point,
+        label: incident.kind.charAt(0).toUpperCase() + incident.kind.slice(1),
+        detail:
+          (incident.note ? `${incident.note} · ` : "") +
+          (incident.confirmations > 0
+            ? `${incident.confirmations} confirmed`
+            : "Unconfirmed report"),
+        kind: "incident" as const,
+      }),
+    );
+
+    return [...userMarker, ...markers, ...incidentMarkers, ...alertMarkers];
+  }, [location, markers, community.feed, beacon.alert]);
 
   const voiceState: VoiceState = busy
     ? "thinking"
@@ -582,13 +622,7 @@ export default function Home() {
           )}
         </FloatingButton>
 
-        <FloatingButton
-          onClick={() => setSosOpen(true)}
-          title="Emergency SOS"
-          danger
-        >
-          <Shield size={18} />
-        </FloatingButton>
+        <SosPill live={beacon.alert !== null} onClick={() => setSosOpen(true)} />
       </div>
 
       <BottomSheet detent={detent} onDetentChange={setDetent} label="Find Me panel">
@@ -670,10 +704,20 @@ export default function Home() {
             }}
           />
         ) : tab === "safety" ? (
-          <SafetyPanel
+          <SafetyCommunity
+            location={location}
             locationLabel={locationLabel}
+            beacon={beacon}
+            feed={community.feed}
+            feedLoading={community.loading}
+            onRefresh={() => void community.refresh()}
             onSos={() => setSosOpen(true)}
             onShareLocation={shareLocation}
+            onShowOnMap={(point) => {
+              setFollowUser(false);
+              setFocus(point);
+              setDetent("peek");
+            }}
           />
         ) : (
           <ProfilePanel
@@ -705,6 +749,7 @@ export default function Home() {
         open={sosOpen}
         location={location}
         locationDescription={locationDescription}
+        beacon={beacon}
         onClose={() => setSosOpen(false)}
       />
 
@@ -729,6 +774,48 @@ export default function Home() {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * The always-visible SOS control.
+ *
+ * Previously an unlabelled shield icon the same size and glass style as "my
+ * location", which the first real user could not find. An emergency control
+ * that has to be discovered is not an emergency control: this one is red,
+ * says SOS in words, and when an alert is live it pulses and says LIVE so the
+ * person can see from across the room that their position is still going out.
+ */
+function SosPill({ live, onClick }: { live: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={live ? "SOS is live — tap to manage" : "Emergency SOS"}
+      className={live ? "fm-sos-live" : undefined}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 5,
+        height: 44,
+        minWidth: 44,
+        padding: "0 12px",
+        borderRadius: "var(--radius-md)",
+        border: "none",
+        background: live
+          ? "linear-gradient(160deg, #dc2626, #7f1d1d)"
+          : "linear-gradient(160deg, #ef4444, #b91c1c)",
+        color: "#fff",
+        fontSize: 13,
+        fontWeight: 800,
+        letterSpacing: "0.06em",
+        boxShadow: "0 8px 20px -6px rgb(239 68 68 / 0.7)",
+      }}
+    >
+      <ShieldAlert size={17} strokeWidth={2.4} aria-hidden="true" />
+      {live ? "LIVE" : "SOS"}
+    </button>
+  );
+}
 
 function FloatingButton({
   children,

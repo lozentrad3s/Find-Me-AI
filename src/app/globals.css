@@ -440,3 +440,35 @@ textarea {
   white-space: nowrap;
   border: 0;
 }
+
+/* --- SOS: live state ------------------------------------------------------
+   Shared by the floating SOS control and the nearby-alert map pin. A ring
+   that expands and fades — visible from across a room, and the only
+   continuously animating thing in the app, so it cannot be mistaken for
+   decoration. */
+
+@keyframes fm-sos-ring {
+  0%   { box-shadow: 0 0 0 0 rgb(239 68 68 / 0.6), 0 8px 20px -6px rgb(239 68 68 / 0.7); }
+  70%  { box-shadow: 0 0 0 14px rgb(239 68 68 / 0), 0 8px 20px -6px rgb(239 68 68 / 0.7); }
+  100% { box-shadow: 0 0 0 0 rgb(239 68 68 / 0), 0 8px 20px -6px rgb(239 68 68 / 0.7); }
+}
+
+.fm-sos-live {
+  animation: fm-sos-ring 1.6s ease-out infinite;
+}
+
+.fm-alert-pin > span:first-child {
+  animation: fm-alert-pulse 1.6s ease-out infinite;
+}
+
+@keyframes fm-alert-pulse {
+  0%   { transform: scale(0.6); opacity: 1; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fm-sos-live,
+  .fm-alert-pin > span:first-child {
+    animation: none;
+  }
+}

@@ -24,7 +24,12 @@ export interface MapMarker {
   point: LatLng;
   label: string;
   detail?: string;
-  kind: "user" | "result" | "route-end";
+  /**
+   * `incident` — a community report: static, amber, a warning not an alarm.
+   * `alert` — someone nearby with SOS active: red and pulsing, because it is
+   * live and it is the one thing on the map a neighbour must not miss.
+   */
+  kind: "user" | "result" | "route-end" | "incident" | "alert";
 }
 
 export type TravelMode = "foot" | "bike" | "car" | "still";
@@ -46,6 +51,15 @@ export interface MapViewProps {
   accuracyM?: number | null;
   /** Keep the map centred on the user as they move. */
   followUser?: boolean;
+  /**
+   * Path already travelled, oldest first.
+   *
+   * Distinct from `routeGeometry`, which is a route someone is *proposing* to
+   * take. This is where a person has actually been, and the tracking page
+   * draws it so whoever is watching can tell a stationary phone from one that
+   * has been moving steadily away.
+   */
+  trail?: LatLng[];
 }
 
 /**
@@ -111,6 +125,38 @@ function userIcon(heading: number | null, mode: TravelMode): L.DivIcon {
 function pinIcon(kind: MapMarker["kind"]): L.DivIcon {
   if (kind === "user") {
     return userIcon(null, "still");
+  }
+
+  if (kind === "alert") {
+    return L.divIcon({
+      className: "",
+      iconSize: [40, 40],
+      iconAnchor: [20, 20],
+      popupAnchor: [0, -18],
+      html: `<span class="fm-alert-pin" style="position:relative;display:grid;place-items:center;width:40px;height:40px">
+        <span style="position:absolute;inset:0;border-radius:50%;background:rgb(239 68 68 / .28)"></span>
+        <span style="position:relative;display:grid;place-items:center;width:24px;height:24px;border-radius:50%;
+          background:#dc2626;border:3px solid #fff;box-shadow:0 2px 8px rgb(127 29 29 / .5);
+          color:#fff;font:800 11px/1 system-ui">!</span>
+      </span>`,
+    });
+  }
+
+  if (kind === "incident") {
+    return L.divIcon({
+      className: "",
+      iconSize: [26, 26],
+      iconAnchor: [13, 13],
+      popupAnchor: [0, -12],
+      html: `<span style="display:grid;place-items:center;width:26px;height:26px;border-radius:50%;
+          background:#f59e0b;border:2.5px solid var(--surface);
+          box-shadow:0 2px 6px rgb(120 53 15 / .4);color:#fff">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.8" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 8v5M12 17h.01"/>
+        </svg>
+      </span>`,
+    });
   }
 
   const fill = kind === "route-end" ? "var(--accent)" : "var(--primary)";
@@ -192,6 +238,7 @@ export default function MapView({
   travelMode = "still",
   accuracyM = null,
   followUser = false,
+  trail,
 }: MapViewProps) {
   const routePoints = useMemo(
     () => (routeGeometry ? decodePolyline(routeGeometry) : []),
@@ -229,6 +276,23 @@ export default function MapView({
           />
           <RouteFitter points={routePoints} />
         </>
+      )}
+
+      {/*
+        The travelled path. Dashed and beneath everything else so it reads as
+        history rather than as a route to follow.
+      */}
+      {trail && trail.length > 1 && (
+        <Polyline
+          positions={trail.map((p) => [p.lat, p.lng])}
+          pathOptions={{
+            color: "var(--danger, #e5484d)",
+            weight: 4,
+            opacity: 0.75,
+            dashArray: "1 9",
+            lineCap: "round",
+          }}
+        />
       )}
 
       {/*

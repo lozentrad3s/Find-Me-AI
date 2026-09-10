@@ -24,6 +24,7 @@ import { buildProviders, selectAssistant } from "@/lib/providers/registry";
 import { getWeather } from "@/lib/weather/open-meteo";
 import { computeRoute } from "@/lib/routing/osrm";
 import { DEFAULT_CITY } from "@/lib/geo/cities";
+import { safetyStore } from "@/lib/safety/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -108,6 +109,24 @@ export async function GET(): Promise<Response> {
     }),
   );
 
+  /*
+   * The safety store is checked, not just named.
+   *
+   * A Supabase URL and key can both be set while the migration was never
+   * applied, in which case every SOS write fails and silently falls back to
+   * memory. Reading the table here turns that into a red line on deploy day
+   * instead of a discovery during someone's emergency.
+   */
+  const safety = safetyStore();
+  checks.push(
+    await timed("safety:store", async () => {
+      await safety.incidentsNear(centre, 1000, Date.now() - 60_000);
+      return safety.durable
+        ? "supabase (durable)"
+        : "memory only — alerts will not survive a restart; set Supabase credentials";
+    }),
+  );
+
   const configured = {
     places: providers.places.name,
     geocoding: providers.geocoding.name,
@@ -116,6 +135,17 @@ export async function GET(): Promise<Response> {
     grounding: process.env.GEMINI_GROUNDING === "true",
     traffic: process.env.TOMTOM_API_KEY?.trim() ? "tomtom" : "none (reports unknown)",
     region: process.env.VERCEL_REGION ?? "local",
+    safetyStore: safety.name,
+    safetyDurable: safety.durable,
+    securityPartners: (() => {
+      try {
+        const parsed = JSON.parse(process.env.SECURITY_PARTNERS ?? "[]") as unknown;
+        return Array.isArray(parsed) ? parsed.length : 0;
+      } catch {
+        return 0;
+      }
+    })(),
+    smsGateway: Boolean(process.env.SMS_GATEWAY_URL?.trim()),
   };
 
   const failed = checks.filter((check) => !check.ok);
