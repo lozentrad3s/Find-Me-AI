@@ -42,6 +42,26 @@ import { SYSTEM_PROMPT } from "./agent";
  */
 export const DEFAULT_GEMINI_MODEL = "gemini-3.7-flash";
 
+/**
+ * Models to fall back through when the daily quota is exhausted.
+ *
+ * The free tier meters roughly TWENTY requests per day *per model*, so a
+ * single afternoon of testing exhausts one and the assistant simply stops
+ * answering. Rotating on a 429 turns ~20 requests a day into ~60 across three
+ * models, which is the difference between being able to test and not.
+ *
+ * This is a testing accommodation, not a production strategy. Sixty requests
+ * a day cannot serve real users; that needs a paid Gemini plan or an
+ * Anthropic key. It is here so the free tier is usable for development rather
+ * than dying halfway through an afternoon.
+ */
+const FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.8-flash"];
+
+function isQuotaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /429|RESOURCE_EXHAUSTED|quota/i.test(message);
+}
+
 /** Same ceiling as the Claude agent: cost and latency, not capability. */
 const MAX_ITERATIONS = 6;
 
@@ -88,7 +108,12 @@ export async function* runGeminiAgent(
   options: RunGeminiOptions,
 ): AsyncGenerator<AgentEvent> {
   const client = new GoogleGenAI({ apiKey: options.apiKey });
-  const model = options.model ?? DEFAULT_GEMINI_MODEL;
+
+  // Start on the configured model, then the rest of the ladder minus it.
+  const preferred = options.model ?? DEFAULT_GEMINI_MODEL;
+  const ladder = [preferred, ...FALLBACK_MODELS.filter((m) => m !== preferred)];
+  let modelIndex = 0;
+  let model = ladder[0]!;
 
   const tools = buildTools(options);
 
@@ -99,13 +124,32 @@ export async function* runGeminiAgent(
 
   try {
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-      const response = (await callModel(client, {
-        model,
-        contents,
-        tools,
-        // Gemini has a real system field on this surface, unlike Interactions.
-        systemInstruction: SYSTEM_PROMPT,
-      })) as {
+      /*
+       * Try the current model; on a quota error move down the ladder and
+       * retry the same turn. Any other error propagates — a malformed request
+       * would fail identically on every model, and retrying it three times
+       * just makes the user wait three times as long for the same failure.
+       */
+      let raw: unknown;
+
+      for (;;) {
+        try {
+          raw = await callModel(client, {
+            model,
+            contents,
+            tools,
+            // Gemini has a real system field here, unlike Interactions.
+            systemInstruction: SYSTEM_PROMPT,
+          });
+          break;
+        } catch (error) {
+          if (!isQuotaError(error) || modelIndex >= ladder.length - 1) throw error;
+          modelIndex += 1;
+          model = ladder[modelIndex]!;
+        }
+      }
+
+      const response = raw as {
         text?: string;
         functionCalls?: GeminiFunctionCall[];
         candidates?: Array<{ content?: GeminiContent }>;
