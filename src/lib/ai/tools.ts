@@ -30,6 +30,7 @@ import {
 import { decodePolyline } from "@/lib/geo/polyline";
 import { NoTrafficProvider, type TrafficProvider } from "@/lib/traffic/types";
 import { getWeather } from "@/lib/weather/open-meteo";
+import { scanSurroundings } from "@/lib/resolution/surroundings";
 
 export type RiskTier = "read" | "write" | "notify" | "emergency" | "financial";
 
@@ -362,6 +363,47 @@ const routeConditionsTool: AgentTool = {
   },
 };
 
+const scanSurroundingsTool: AgentTool = {
+  name: "scan_surroundings",
+  tier: "read",
+  description:
+    "Full scan of what is around a point: the street, the district, the most recognisable nearby landmark, and everything named within 400m with distances and compass directions. Defaults to the user's location. Use this when the user asks where they are, says they are lost, needs to describe their position to someone else, or when a resolved place needs to be explained by its surroundings. IMPORTANT: read `data_gaps` and obey it. Building colours are NOT in the map data anywhere in Nigeria — never describe the colour of a building, and never invent a detail the scan did not return.",
+  input_schema: {
+    type: "object",
+    properties: {
+      lat: { type: "number", description: "Latitude. Defaults to the user." },
+      lng: { type: "number", description: "Longitude. Defaults to the user." },
+    },
+  },
+  async execute(input, context) {
+    const point = readPoint(input, context);
+    if (!point) return NO_LOCATION;
+
+    const report = await scanSurroundings(point, {
+      places: context.providers.places,
+      geocoding: context.providers.geocoding,
+    });
+
+    return {
+      address: report.address,
+      street: report.street,
+      area: report.area,
+      spoken_description: report.spokenDescription,
+      primary_landmark: report.primaryLandmark,
+      nearby: report.features.map((feature) => ({
+        name: feature.name,
+        category: feature.category,
+        distance_m: feature.distanceM,
+        direction: feature.direction,
+        // Present only when OSM actually carries the tag.
+        ...(feature.colour ? { colour: feature.colour } : {}),
+      })),
+      summary: report.summary,
+      data_gaps: report.dataGaps,
+    };
+  },
+};
+
 const weatherTool: AgentTool = {
   name: "get_weather",
   tier: "read",
@@ -413,6 +455,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   routeTool,
   routeConditionsTool,
   weatherTool,
+  scanSurroundingsTool,
 ];
 
 export const TOOLS_BY_NAME = new Map(

@@ -20,7 +20,7 @@
  * returning 403 from this IP".
  */
 
-import { buildProviders } from "@/lib/providers/registry";
+import { buildProviders, selectAssistant } from "@/lib/providers/registry";
 import { getWeather } from "@/lib/weather/open-meteo";
 import { computeRoute } from "@/lib/routing/osrm";
 import { DEFAULT_CITY } from "@/lib/geo/cities";
@@ -112,9 +112,8 @@ export async function GET(): Promise<Response> {
     places: providers.places.name,
     geocoding: providers.geocoding.name,
     llm: providers.llm.name,
-    assistant: process.env.ANTHROPIC_API_KEY?.trim()
-      ? "claude"
-      : "offline (keyword matching)",
+    assistant: selectAssistant(),
+    grounding: process.env.GEMINI_GROUNDING === "true",
     traffic: process.env.TOMTOM_API_KEY?.trim() ? "tomtom" : "none (reports unknown)",
     region: process.env.VERCEL_REGION ?? "local",
   };

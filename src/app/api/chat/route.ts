@@ -10,9 +10,10 @@
  * The API key stays server-side. It is never sent to the browser.
  */
 
-import { buildProviders } from "@/lib/providers/registry";
+import { buildProviders, selectAssistant } from "@/lib/providers/registry";
 import { runAgent, type ChatMessage } from "@/lib/ai/agent";
 import { runOfflineAgent } from "@/lib/ai/offline-agent";
+import { runGeminiAgent } from "@/lib/ai/gemini-agent";
 import { NoTrafficProvider } from "@/lib/traffic/types";
 import { TomTomTrafficProvider } from "@/lib/traffic/tomtom";
 
@@ -44,7 +45,7 @@ export async function POST(request: Request): Promise<Response> {
    * they are talking to an assistant while actually talking to a regex will
    * conclude the assistant is bad, and they would be right.
    */
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const assistant = selectAssistant();
 
   let body: ChatBody;
   try {
@@ -88,21 +89,32 @@ export async function POST(request: Request): Promise<Response> {
       };
 
       try {
-        const stream = apiKey
-          ? runAgent({
-              apiKey,
-              messages,
-              model: process.env.ANTHROPIC_CHAT_MODEL?.trim() || undefined,
-              context: toolContext,
-              signal: request.signal,
-            })
-          : runOfflineAgent({
-              messages,
-              context: toolContext,
-              // Only the first exchange explains the mode; repeating it every
-              // turn would bury the answers.
-              announce: messages.length <= 1,
-            });
+        const stream =
+          assistant === "claude"
+            ? runAgent({
+                apiKey: process.env.ANTHROPIC_API_KEY!.trim(),
+                messages,
+                model: process.env.ANTHROPIC_CHAT_MODEL?.trim() || undefined,
+                context: toolContext,
+                signal: request.signal,
+              })
+            : assistant === "gemini"
+              ? runGeminiAgent({
+                  apiKey: (process.env.GEMINI_API_KEY ??
+                    process.env.GOOGLE_API_KEY)!.trim(),
+                  messages,
+                  model: process.env.GEMINI_CHAT_MODEL?.trim() || undefined,
+                  context: toolContext,
+                  // Grounding routes around our own resolution engine, so it
+                  // is opt-in rather than a silent default.
+                  grounding: process.env.GEMINI_GROUNDING === "true",
+                })
+              : runOfflineAgent({
+                  messages,
+                  context: toolContext,
+                  // Only the first exchange explains the mode.
+                  announce: messages.length <= 1,
+                });
 
         for await (const event of stream) {
           send(controller, event);

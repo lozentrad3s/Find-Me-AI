@@ -21,6 +21,7 @@ import {
 } from "./osm/nominatim";
 import { OverpassPlacesProvider } from "./osm/overpass";
 import { AnthropicLlmProvider } from "./anthropic/llm";
+import { GeminiLlmProvider } from "./gemini/llm";
 
 export interface ProviderSelection extends Providers {
   /** Anything that silently downgraded, for display. */
@@ -29,6 +30,8 @@ export interface ProviderSelection extends Providers {
 
 /** Default parse model. Small and cheap — this is a bounded extraction task. */
 const DEFAULT_PARSE_MODEL = "claude-haiku-4-5";
+/** Gemini's free tier needs no card, which is why it is worth supporting. */
+const DEFAULT_GEMINI_PARSE_MODEL = "gemini-3.8-flash";
 
 export function buildProviders(
   env: NodeJS.ProcessEnv = process.env,
@@ -36,10 +39,20 @@ export function buildProviders(
   const notes: string[] = [];
   const googleKey = env.GOOGLE_MAPS_API_KEY?.trim();
   const anthropicKey = env.ANTHROPIC_API_KEY?.trim();
+  const geminiKey = (env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY)?.trim();
 
   const wantPlaces = (env.PLACES_PROVIDER ?? "osm").toLowerCase();
   const wantGeocoding = (env.GEOCODING_PROVIDER ?? "osm").toLowerCase();
-  const wantLlm = (env.LLM_PROVIDER ?? "anthropic").toLowerCase();
+  /*
+   * Auto-select rather than defaulting to one and failing.
+   *
+   * Whichever key is present wins, so a fresh clone with only a free Gemini
+   * key works without also having to know to set LLM_PROVIDER.
+   */
+  const wantLlm = (
+    env.LLM_PROVIDER ??
+    (anthropicKey ? "anthropic" : geminiKey ? "gemini" : "anthropic")
+  ).toLowerCase();
 
   // --- Places -------------------------------------------------------------
   let places: Providers["places"];
@@ -84,11 +97,19 @@ export function buildProviders(
       anthropicKey,
       env.ANTHROPIC_PARSE_MODEL?.trim() || DEFAULT_PARSE_MODEL,
     );
+  } else if (wantLlm === "gemini" && geminiKey) {
+    llm = new GeminiLlmProvider(
+      geminiKey,
+      env.GEMINI_PARSE_MODEL?.trim() || DEFAULT_GEMINI_PARSE_MODEL,
+    );
   } else {
     if (wantLlm === "anthropic" && !anthropicKey) {
       notes.push(
-        "ANTHROPIC_API_KEY is unset — parsing with the rule-based fallback. Search still works; the AI chat does not.",
+        "ANTHROPIC_API_KEY is unset — parsing with the rule-based fallback. Search still works; the assistant runs in offline mode.",
       );
+    }
+    if (wantLlm === "gemini" && !geminiKey) {
+      notes.push("GEMINI_API_KEY is unset — parsing with the rule-based fallback.");
     }
     llm = new MockLlmProvider();
   }
@@ -96,9 +117,19 @@ export function buildProviders(
   return { places, geocoding, llm, notes };
 }
 
-/** True when the chat endpoint can actually run. */
-export function hasLlmCredentials(
+/** Which assistant the chat endpoint will use. */
+export function selectAssistant(
   env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  return Boolean(env.ANTHROPIC_API_KEY?.trim());
+): "claude" | "gemini" | "offline" {
+  const forced = env.LLM_PROVIDER?.trim().toLowerCase();
+
+  if (forced === "anthropic" && env.ANTHROPIC_API_KEY?.trim()) return "claude";
+  if (forced === "gemini" && (env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY)?.trim()) {
+    return "gemini";
+  }
+  if (forced === "mock" || forced === "offline") return "offline";
+
+  if (env.ANTHROPIC_API_KEY?.trim()) return "claude";
+  if ((env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY)?.trim()) return "gemini";
+  return "offline";
 }

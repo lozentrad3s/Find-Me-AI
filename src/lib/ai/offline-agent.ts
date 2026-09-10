@@ -98,12 +98,18 @@ async function* route(
   // Order matters: "is there traffic to Wuse" mentions a destination but is a
   // traffic question, and "where am I" must not be read as a place search.
   if (WHERE_AM_I_RE.test(phrase)) {
-    yield* runTool("where_am_i", {}, context, (result) => {
-      const data = result as { address?: string | null; lat?: number; lng?: number };
-      if (!data.address) {
-        return "I can see your coordinates but could not match them to an address.";
-      }
-      return `You're at ${data.address}.`;
+    // scan_surroundings rather than where_am_i: a raw address is far less
+    // useful than "you're on Gana Street, the filling station is 80m north".
+    // Landmarks are how people here actually establish where they are.
+    yield* runTool("scan_surroundings", {}, context, (result) => {
+      const data = result as {
+        spoken_description?: string;
+        address?: string | null;
+      };
+      return (
+        data.spoken_description ??
+        (data.address ? `You're at ${data.address}.` : "I could not work out where you are.")
+      );
     });
     return;
   }

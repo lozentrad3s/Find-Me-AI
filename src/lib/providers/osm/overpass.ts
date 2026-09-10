@@ -246,13 +246,18 @@ function filtersForKeyword(keyword?: string): string[] {
     /*
      * No category given — "what is around this point".
      *
-     * Three separate tag clauses made this the single slowest call in the
-     * product, over ten seconds, because Overpass evaluates each independently
-     * across the radius. One clause covers the landmarks people actually
-     * navigate by, and anything unnamed is useless as a spoken landmark
-     * anyway, so the name filter is doing real work rather than tidying.
+     * This was cut to a single `amenity` clause for speed, and that went too
+     * far: a scan around Maitama returned nothing at all at 400m, while the
+     * same point with `shop` and `office` included returned twelve real
+     * landmarks — a filling station, three restaurants, a supermarket. In
+     * Abuja a great deal of what people navigate by is tagged `shop`, not
+     * `amenity`, so dropping it removed most of the useful answers.
+     *
+     * Three clauses cost a few hundred milliseconds against a budget that
+     * already degrades gracefully. Being empty is worse. The name filter
+     * stays: an unnamed node cannot be spoken aloud as a landmark.
      */
-    return ['["amenity"]["name"]'];
+    return ['["amenity"]["name"]', '["shop"]["name"]', '["office"]["name"]'];
   }
 
   const lower = normalise(keyword);
