@@ -56,6 +56,13 @@ const CASES: Case[] = [
   { text: "where is asokor", expect: "area_info", corrected: "Asokoro" },
 
   // --- place lookups -------------------------------------------------------
+  // A name in front of a category is one specific place. Answering these with
+  // "the nearest hospital" is what sent a user miles from the place they named.
+  { text: "clover hospital", expect: "place_lookup", target: /clover/i },
+  { text: "christian community school", expect: "place_lookup", target: /christian community/i },
+  { text: "nigerian tulip school", expect: "place_lookup", target: /tulip/i },
+  { text: "jabi lake mall", expect: "place_lookup", target: /jabi lake mall/i },
+  { text: "wuse market", expect: "place_lookup", target: /wuse market/i },
   { text: "where is jabi lake mall", expect: "place_lookup", target: /jabi lake mall/i },
   { text: "find transcorp hilton", expect: "place_lookup", target: /transcorp hilton/i },
   { text: "the guest house behind the mosque on Buhari Street, Wuse", expect: "place_lookup" },

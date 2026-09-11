@@ -198,6 +198,58 @@ function referencedPlace(
   return null;
 }
 
+/**
+ * Words that qualify a category rather than name a place: "a", "good",
+ * "nearest", "open". A name is none of these.
+ */
+const CATEGORY_FILLER = new Set([
+  "a", "an", "any", "the", "some", "my", "our", "near", "nearest", "closest",
+  "close", "nearby", "around", "me", "to", "in", "at", "on", "of", "and", "or",
+  "for", "find", "show", "where", "is", "get", "go", "i", "we", "you", "need",
+  "want", "looking", "please", "good", "best", "cheap", "nice", "new", "open",
+  "here", "there", "this", "that", "big", "small", "24", "hour", "hours",
+]);
+
+/**
+ * The words naming a place in front of its category — "clover" in "clover
+ * hospital", "christian community" in "christian community school".
+ *
+ * Only words BEFORE the category word count. "a park to relax" has a spare
+ * word too, but it comes after and qualifies the park rather than naming it,
+ * and treating it as a name would turn an ordinary category search into a
+ * hunt for a place called "relax". District names are excluded — "hotels in
+ * Wuse 2" names an area to search, not a hotel.
+ */
+function nameBeforeCategory(
+  words: string[],
+  category: CategoryMatch,
+  names: NameMatch[],
+): string[] {
+  const districtWords = new Set(
+    names
+      .filter((name) => name.kind === "district")
+      .flatMap((name) => name.heard.split(" ")),
+  );
+
+  const categoryAt = words.findIndex((word) => {
+    // Test each word on its own so "bus station" matches at "bus".
+    const pattern = new RegExp(category.query.split(" ")[0]!, "i");
+    return pattern.test(word) || CATEGORIES.some((entry) => entry.query === category.query && entry.pattern.test(word));
+  });
+
+  if (categoryAt <= 0) return [];
+
+  return words
+    .slice(0, categoryAt)
+    .filter(
+      (word) =>
+        word.length > 2 &&
+        !CATEGORY_FILLER.has(word) &&
+        !districtWords.has(word) &&
+        !/^\d+$/.test(word),
+    );
+}
+
 function cleanPiece(piece: string): string {
   return piece
     .replace(/^\s*(?:the)\s+/i, "")
@@ -331,6 +383,34 @@ export function classifyIntent(
         ? corrected(where.trim())
         : undefined;
     return { kind: "weather", target: place, ...base, reason: place ? "weather in a named place" : "weather here" };
+  }
+
+  /*
+   * A name in front of a category is a specific place, not a category search.
+   *
+   * "clover hospital" is two words, so it used to fall straight through to
+   * "find me any hospital" and answered with the nearest one — substituting a
+   * different hospital for the one that was named, which is the failure this
+   * app most needs to avoid. "a park to relax" is not that: the extra word
+   * comes after the category and qualifies it rather than naming it.
+   */
+  const namedPlace =
+    category !== undefined &&
+    (names.some((name) => name.kind === "landmark") ||
+      // "where can I get fuel" has spare words too, but they ask for any
+      // filling station; the phrasing itself says it is a category search.
+      (!NEARBY.test(text) && nameBeforeCategory(words, category, names).length > 0));
+
+  if (namedPlace) {
+    const target = extractTarget(said);
+    if (target) {
+      return {
+        kind: "place_lookup",
+        target: corrected(target),
+        ...base,
+        reason: "a specific place named in front of a category",
+      };
+    }
   }
 
   if (category && (NEARBY.test(text) || words.length <= 4)) {
