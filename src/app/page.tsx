@@ -618,6 +618,20 @@ export default function Home() {
 
       if (interp.route !== undefined && !navigatingRef.current) setRouteGeometry(interp.route);
 
+      /*
+       * One answer on the map at a time.
+       *
+       * Without this the map accumulated: the road from the last traffic
+       * question stayed coloured under the pins of the next search, and a
+       * preview route from a trip the user abandoned stayed drawn across
+       * them. Each new answer clears what the previous one drew, unless a
+       * trip is actually running.
+       */
+      if (interp.markers && !navigatingRef.current) {
+        if (!interp.roads) setRoadHighlights([]);
+        if (interp.route === undefined && !interp.trip) setRouteGeometry(null);
+      }
+
       if (interp.markers) {
         const current = tripRef.current;
         setMarkers(
@@ -1134,6 +1148,17 @@ export default function Home() {
         roads={roadHighlights}
         focus={focus}
         fitPoints={fitPoints}
+        /*
+         * How much map the sheet is covering, so results are fitted into the
+         * strip the user can actually see. At "full" the sheet is nearly the
+         * whole screen, but results always drop it to "half", so half is the
+         * right reservation in both cases.
+         */
+        bottomInset={
+          detent === "peek"
+            ? Math.round((typeof window === "undefined" ? 800 : window.innerHeight) * 0.16)
+            : Math.round((typeof window === "undefined" ? 800 : window.innerHeight) * 0.52)
+        }
         dark={theme === "dark"}
         heading={heading}
         travelMode={travelMode}

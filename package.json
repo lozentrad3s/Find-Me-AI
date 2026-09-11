@@ -12,7 +12,9 @@
     "harness:abuja": "tsx src/harness/env-mock.ts --city=abuja",
     "typecheck": "tsc --noEmit",
     "harness:models": "tsx src/harness/compare.ts",
-    "harness:intents": "tsx src/harness/intents.ts"
+    "harness:intents": "tsx src/harness/intents.ts",
+    "check:parse": "tsx scripts/parse-check.ts",
+    "check:resolve": "tsx scripts/resolve-check.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

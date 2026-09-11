@@ -43,6 +43,7 @@ Set these in Vercel → Project → Settings → Environment Variables:
 | `ANTHROPIC_API_KEY` | The real assistant | Falls back to keyword matching, announced in-app |
 | `TOMTOM_API_KEY` | Live traffic: the coloured traffic layer, traffic on named roads, traffic on every planned trip | Traffic is reported as unknown everywhere and the layer stays off |
 | `FAST_REPLIES` | `off` makes the model phrase every answer | Recognised requests are answered from their results in ~1s |
+| `WEB_PLACE_SEARCH` | `off` disables the web fallback for places the map does not know | On whenever a Gemini key exists |
 | `GEMINI_THINKING_LEVEL` | Gemini reasoning depth | `LOW` |
 | `ANTHROPIC_CHAT_MODEL` | Model choice | `claude-haiku-4-5` |
 | `OSRM_BASE_URL` | Own routing server | Public OSRM demo (no SLA) |

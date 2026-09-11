@@ -291,6 +291,60 @@ function fromArea(report: AreaReport): Interpretation {
   };
 }
 
+interface WebPlaceShape {
+  query?: string;
+  searched_for?: string;
+  web?: {
+    found_name?: string | null;
+    found_address?: string | null;
+    confidence?: string;
+    note?: string | null;
+  } | null;
+  band?: "high" | "moderate" | "low";
+  best?: {
+    name?: string;
+    address?: string;
+    lat?: number;
+    lng?: number;
+    place_id?: string | null;
+    distance_m?: number | null;
+  } | null;
+  note?: string | null;
+}
+
+/**
+ * A place the map did not know, found by searching the web and then geocoded.
+ *
+ * It lands on the screen exactly like a mapped result — pin, card, Directions
+ * button — because by this point it *is* a mapped result: the coordinates came
+ * from the geocoder. Only the name and address came from the web, which is
+ * what the reply says out loud.
+ */
+function fromWebPlace(data: WebPlaceShape): Interpretation {
+  const best = data.best;
+  if (!best || typeof best.lat !== "number" || typeof best.lng !== "number") return {};
+
+  const point = { lat: best.lat, lng: best.lng };
+  const place: CardPlace = {
+    id: best.place_id ?? `web-${best.lat}-${best.lng}`,
+    name: best.name ?? data.web?.found_name ?? "Result",
+    address: best.address ?? data.web?.found_address ?? null,
+    lat: best.lat,
+    lng: best.lng,
+    distanceM: best.distance_m ?? null,
+  };
+
+  return {
+    band: data.band,
+    markers: [
+      { id: place.id, point, label: place.name, detail: place.address ?? undefined, kind: "route-end" },
+    ],
+    focus: point,
+    cards: [{ type: "place", place }],
+    places: [toContext(place)],
+  };
+}
+
 function fromWeb(data: WebLookup & { name?: string }): Interpretation {
   if (!data.summary && data.images.length === 0) return {};
 
@@ -403,6 +457,8 @@ export function interpretToolResult(name: string, result: unknown): Interpretati
       return fromArea(result as AreaReport);
     case "web_lookup":
       return fromWeb(result as WebLookup & { name?: string });
+    case "web_place_search":
+      return fromWebPlace(result as WebPlaceShape);
     case "check_road_traffic":
       return fromRoads(result as { roads?: RoadTrafficReport[] });
     case "get_weather":

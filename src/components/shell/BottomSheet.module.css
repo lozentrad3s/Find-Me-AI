@@ -80,7 +80,16 @@
   overscroll-behavior: contain;
   /* Restore normal scrolling inside; the sheet itself owns the drag gesture. */
   touch-action: pan-y;
-  padding-bottom: calc(var(--space-6) + env(safe-area-inset-bottom, 0));
+  /*
+   * Clear the tab bar.
+   *
+   * The nav is fixed to the bottom of the screen above this sheet, so anything
+   * within ~70px of the sheet's bottom edge is behind it. That is where the
+   * chat composer lives: users reported the chat simply would not let them
+   * type, because the box they were reaching for was underneath the tab bar.
+   * The last row of every other panel was half-hidden for the same reason.
+   */
+  padding-bottom: calc(78px + env(safe-area-inset-bottom, 0px));
 }
 
 /* At peek height the body must not scroll, or a drag upward scrolls the

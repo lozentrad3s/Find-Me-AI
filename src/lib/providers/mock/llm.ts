@@ -122,6 +122,7 @@ export class MockLlmProvider implements LlmProvider {
       street,
       area,
       city,
+      houseNumber,
       anchors: landmarkRelations.map((r) => r.anchor),
       placeType,
     });
@@ -276,12 +277,49 @@ function extractPlaceType(lower: string): string | null {
 }
 
 /**
- * Proper name extraction.
+ * Words that wrap a request rather than name a place.
  *
- * Uses capitalisation in the *original* phrase, then subtracts everything
- * already accounted for by another field. Typed input from users is often
- * lowercase, so this returns null more often than it fires — which is correct
- * behaviour: a wrong name is worse than no name.
+ * "take me to christian community school" is a name with a request around it;
+ * subtracting the request is what leaves the name.
+ */
+const REQUEST_WORDS = new Set([
+  "take", "me", "to", "show", "find", "locate", "search", "for", "where", "is",
+  "wheres", "whats", "what", "how", "do", "can", "i", "get", "go", "going",
+  "navigate", "direction", "directions", "route", "drive", "walk", "please",
+  "the", "a", "an", "any", "some", "my", "our", "your", "that", "this", "there",
+  "near", "nearest", "closest", "close", "nearby", "around", "about", "tell",
+  "us", "we", "you", "want", "need", "looking", "look", "up", "s", "of", "at",
+  "in", "on", "from", "by", "with", "and", "or", "kindly", "abeg",
+  // Relation words say where a place is, never what it is called. Without
+  // these, "the guest house behind the mosque…" came back named "behind".
+  "behind", "opposite", "beside", "facing", "inside", "within", "along",
+  "past", "after", "before", "between", "front", "back", "across", "next",
+  "alongside", "off",
+]);
+
+/** Street-type words: an address fragment, never a place's name. */
+const STREET_WORD = new RegExp(`^(${STREET_SUFFIXES})$`);
+
+/**
+ * A determiner before the category means a category search, not a name:
+ * "a pharmacy in Garki" wants any pharmacy, "Wuse Market" wants one market.
+ */
+const CATEGORY_DETERMINERS = /\b(a|an|any|some|another|nearest|closest|nearby)\b/;
+
+/**
+ * Proper name extraction, without relying on capitalisation.
+ *
+ * The previous version only accepted capitalised words, so a phrase typed the
+ * way people actually type on a phone — "christian community school" — yielded
+ * NO name at all. Everything downstream then treated it as a bare category
+ * search: the engine looked for the nearest school and confidently returned a
+ * different one 139 m away while the school actually asked for sat 700 m
+ * along the road. The same defect sent a request for a named hospital to
+ * whichever hospital happened to be closest.
+ *
+ * So the name is whatever survives subtracting every part already accounted
+ * for — street, area, city, house number, category, landmark anchors — plus
+ * the words that merely wrap a request. Case is irrelevant to that.
  */
 function extractPlaceName(
   original: string,
@@ -289,34 +327,58 @@ function extractPlaceName(
     street: string | null;
     area: string | null;
     city: string | null;
+    houseNumber: string | null;
     anchors: string[];
     placeType: string | null;
   },
 ): string | null {
   const consumed = new Set<string>();
-  for (const field of [used.street, used.area, used.city, used.placeType]) {
+  for (const field of [used.street, used.area, used.city, used.placeType, used.houseNumber]) {
     if (field) for (const token of normalise(field).split(" ")) consumed.add(token);
   }
   for (const anchor of used.anchors) {
     for (const token of normalise(anchor).split(" ")) consumed.add(token);
   }
 
-  const words = original.split(/[\s,]+/).filter(Boolean);
-  const kept: string[] = [];
+  const words = original
+    .split(/[\s,]+/)
+    .map((word) => word.replace(/[^A-Za-z0-9'&-]/g, ""))
+    .filter(Boolean);
 
-  for (const word of words) {
+  const kept = words.filter((word) => {
     const clean = normalise(word);
-    if (!clean) continue;
-    if (consumed.has(clean)) continue;
-    if (FILLER_NAME_WORDS.has(clean)) continue;
+    if (!clean) return false;
+    if (consumed.has(clean)) return false;
+    if (REQUEST_WORDS.has(clean)) return false;
+    if (FILLER_NAME_WORDS.has(clean)) return false;
+    // A lone number is a house number or noise, never a name.
+    return word.length > 1 && !/^\d+$/.test(word);
+  });
 
-    // Capitalised and not sentence-initial noise.
-    const isCapitalised = /^[A-Z]/.test(word);
-    if (isCapitalised) kept.push(word.replace(/[^A-Za-z0-9'-]/g, ""));
+  /*
+   * Leftover that is itself an address fragment is not a name.
+   *
+   * "21 Agadez Street, Aminu Kano Crescent" leaves "aminu kano crescent" once
+   * the first street is taken, and calling that a place name sends the engine
+   * looking for a business called "Aminu Crescent". A second street is still a
+   * street.
+   */
+  if (kept.some((word) => STREET_WORD.test(normalise(word)))) return null;
+
+  if (kept.length > 0) return kept.slice(0, 5).join(" ");
+
+  /*
+   * Nothing left — but "Wuse Market" and "Jabi Lake" are names built from an
+   * area and a category word. When the two sit side by side and no determiner
+   * asked for "a" market, the pair is the name of one specific place.
+   */
+  const lower = normalise(original);
+  if (used.area && used.placeType && !CATEGORY_DETERMINERS.test(lower)) {
+    const pair = new RegExp(`\\b${escapeRegex(normalise(used.area))}\\s+${escapeRegex(normalise(used.placeType))}\\b`);
+    if (pair.test(lower)) return titleCase(`${used.area} ${used.placeType}`);
   }
 
-  if (kept.length === 0) return null;
-  return kept.join(" ").trim() || null;
+  return null;
 }
 
 function titleCase(text: string): string {

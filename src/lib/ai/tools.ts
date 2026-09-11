@@ -42,6 +42,12 @@ import { planTrip, tripForModel, type TripPlan } from "@/lib/trip/plan";
 import { checkRoadTraffic, type RoadTrafficReport } from "@/lib/traffic/roads";
 import { exploreArea, type AreaReport } from "@/lib/area/explore";
 import { lookupPlaceOnWeb, type WebLookup } from "@/lib/web/wikimedia";
+import {
+  searchPlaceOnWeb,
+  searchStringFor,
+  webPlaceSearchAvailable,
+  type WebPlaceHit,
+} from "@/lib/web/place-search";
 import { applyCorrections, findPlaceNames } from "@/lib/geo/gazetteer";
 import { ABUJA, localCentre } from "@/lib/geo/cities";
 
@@ -170,18 +176,62 @@ const resolvePlaceTool: AgentTool = {
     const corrections = findPlaceNames(said).filter((match) => !match.exact);
     const phrase = applyCorrections(said, corrections);
 
-    const result = await resolvePlace(phrase, context.providers, {
-      context: {
-        city: typeof input.city === "string" ? input.city : context.city,
-        currentLocation: context.currentLocation,
-      },
-    });
+    const resolutionContext = {
+      city: typeof input.city === "string" ? input.city : context.city,
+      currentLocation: context.currentLocation,
+    };
+
+    let result = await resolvePlace(phrase, context.providers, { context: resolutionContext });
+    let viaWeb: WebPlaceHit | null = null;
+    let webQuery: string | null = null;
+
+    /*
+     * The map does not have everything.
+     *
+     * Measured: OpenStreetMap has nothing called "Clover" anywhere in Abuja,
+     * so a real hospital people navigate to every day simply could not be
+     * found — and "I could not find it" is the least useful true answer there
+     * is. The web does know these places, so when the map cannot identify one
+     * confidently we search the web for its official name and address and
+     * resolve THAT.
+     *
+     * The coordinates still come from the geocoder. The search only ever
+     * supplies better words.
+     */
+    if ((result.band.band === "low" || !result.best) && webPlaceSearchAvailable()) {
+      viaWeb = await searchPlaceOnWeb(phrase, {
+        near: resolutionContext.city ? `${resolutionContext.city}, Nigeria` : "Abuja, Nigeria",
+      }).catch(() => null);
+
+      webQuery = viaWeb ? searchStringFor(viaWeb, resolutionContext.city ?? "Abuja") : null;
+
+      if (webQuery) {
+        const retry = await resolvePlace(webQuery, context.providers, {
+          context: resolutionContext,
+        }).catch(() => null);
+
+        if (retry?.best) result = retry;
+        else webQuery = null;
+      }
+    }
 
     return {
       band: result.band.band,
       rationale: result.band.rationale,
       corrected_from: corrections.length > 0 ? said : null,
-      searched_for: phrase,
+      searched_for: webQuery ?? phrase,
+      // Present when the web was used. Say "I found it listed as …" rather
+      // than presenting a web result as though it came from the map.
+      web_search: viaWeb
+        ? {
+            used: Boolean(webQuery),
+            found_name: viaWeb.name,
+            found_address: viaWeb.address,
+            confidence: viaWeb.confidence,
+            note: viaWeb.note,
+            searches: viaWeb.searches,
+          }
+        : null,
       best: result.best
         ? {
             name: result.best.candidate.name,
@@ -869,9 +919,97 @@ const journeyWeatherTool: AgentTool = {
 // Registry
 // ---------------------------------------------------------------------------
 
+const webPlaceSearchTool: AgentTool = {
+  name: "web_place_search",
+  tier: "read",
+  description:
+    "Search the web (Google) for a place the map does not know, then put it on the map. Use this when resolve_place came back with a low band or nothing, or when the user insists a place exists that the map could not find — for example a new clinic, a school, a plaza or a business. It returns the official name and address found online, and the coordinates the geocoder produced for that address. Say plainly that you found it listed online, and offer directions. If `best` is null, the place could not be located even with the web: ask for a nearby landmark instead of offering something else.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "The place as the user described it." },
+      area: { type: "string", description: "District or city to search near, if known." },
+    },
+    required: ["query"],
+  },
+  async execute(input, context) {
+    const query = String(input.query ?? "").trim();
+    if (!query) return { error: "query is required" };
+
+    if (!webPlaceSearchAvailable()) {
+      return {
+        query,
+        web: null,
+        best: null,
+        note: "Web search is not configured, so only the map data is available.",
+      };
+    }
+
+    const area = typeof input.area === "string" && input.area.trim() ? input.area.trim() : null;
+    const city = context.city ?? "Abuja";
+
+    const hit = await searchPlaceOnWeb(query, { near: area ? `${area}, ${city}` : `${city}, Nigeria` });
+    const searchString = hit ? searchStringFor(hit, city) : null;
+
+    if (!hit || !searchString) {
+      return {
+        query,
+        web: hit,
+        best: null,
+        note: hit?.note ?? "The web search found nothing for that place near here.",
+      };
+    }
+
+    // The web supplied the words; the geocoder supplies the point. Nothing
+    // else in this system is allowed to turn text into coordinates.
+    const resolved = await resolvePlace(searchString, context.providers, {
+      context: { city: context.city, currentLocation: context.currentLocation },
+    }).catch(() => null);
+
+    const best = resolved?.best?.candidate ?? null;
+
+    return {
+      query,
+      searched_for: searchString,
+      web: {
+        found_name: hit.name,
+        found_address: hit.address,
+        area: hit.area,
+        confidence: hit.confidence,
+        note: hit.note,
+        searches: hit.searches,
+        source: hit.source,
+      },
+      band: resolved?.band.band ?? "low",
+      best: best
+        ? {
+            name: hit.name ?? best.name,
+            address: best.formattedAddress,
+            lat: best.point.lat,
+            lng: best.point.lng,
+            place_id: best.placeId ?? null,
+            distance_m: context.currentLocation
+              ? Math.round(distanceMetres(context.currentLocation, best.point))
+              : null,
+          }
+        : null,
+      note: best
+        ? "Name and address came from a web listing; the coordinates came from the map. Say that you found it listed online."
+        : "The web named the place but the geocoder could not place the address. Ask for a nearby landmark.",
+    };
+  },
+  forModel(result) {
+    const data = result as Record<string, unknown> & { web?: { searches?: string[] } | null };
+    if (!data.web) return data;
+    const { searches: _searches, ...web } = data.web as Record<string, unknown>;
+    return { ...data, web };
+  },
+};
+
 export const AGENT_TOOLS: AgentTool[] = [
   resolvePlaceTool,
   searchNearbyTool,
+  webPlaceSearchTool,
   planTripTool,
   exploreAreaTool,
   webLookupTool,

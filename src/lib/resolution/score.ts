@@ -133,7 +133,42 @@ export function scoreCandidates(input: ScoreInput): ScoredCandidate[] {
     return { candidate, signals, score, reasons: explain(signals, input) };
   });
 
-  return collapseClusters(scored).sort((a, b) => b.score - a.score);
+  return collapseClusters(applyNameDominance(scored, input)).sort((a, b) => b.score - a.score);
+}
+
+/**
+ * When the user named a place and something matches that name, places that do
+ * not match it are not answers.
+ *
+ * Weighting alone does not settle this. Asked for "Christian Community
+ * School", every school in the district scores a perfect category match, and
+ * the priors — being 139 m away rather than 700 m, being better known — are
+ * then free to decide which one wins. They did, and the app routed to the
+ * wrong school. Distance is a tie-breaker between places that fit the
+ * description; it must never override the description itself.
+ *
+ * A discount rather than a filter: the near-misses stay in the list as
+ * alternatives, they simply stop winning.
+ */
+function applyNameDominance(
+  scored: ScoredCandidate[],
+  input: ScoreInput,
+): ScoredCandidate[] {
+  if (!input.parsed.placeName) return scored;
+
+  const bestName = Math.max(0, ...scored.map((entry) => entry.signals.nameMatch ?? 0));
+  if (bestName < 0.7) return scored;
+
+  return scored.map((entry) => {
+    const nameMatch = entry.signals.nameMatch ?? 0;
+    if (nameMatch >= 0.45) return entry;
+
+    return {
+      ...entry,
+      score: entry.score * 0.45,
+      reasons: [...entry.reasons, `does not match the name asked for`],
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

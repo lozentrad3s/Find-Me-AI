@@ -86,6 +86,13 @@ export interface MapViewProps {
   focus?: LatLng | null;
   /** Fit the view to these points whenever a new set arrives. */
   fitPoints?: LatLng[] | null;
+  /**
+   * Pixels of map hidden by the sheet at the bottom.
+   *
+   * Results are fitted into the visible strip above it; without this the pins
+   * are centred in the map and half of them sit behind the panel listing them.
+   */
+  bottomInset?: number;
   dark?: boolean;
   /** Degrees clockwise from north; null when unknown. */
   heading?: number | null;
@@ -319,22 +326,49 @@ function FocusController({ focus, zoom }: { focus?: LatLng | null; zoom: number 
   return null;
 }
 
-/** Fits the view to a new set of results or a new route. */
-function FitController({ points }: { points?: LatLng[] | null }) {
+/**
+ * Fits the view to a new set of results or a new route.
+ *
+ * `bottomInset` is how much of the map the sheet is covering. Without it, pins
+ * are centred in the *map*, which puts half of them behind the panel listing
+ * them — the results are on screen and invisible at the same time.
+ */
+function FitController({
+  points,
+  bottomInset = 0,
+}: {
+  points?: LatLng[] | null;
+  bottomInset?: number;
+}) {
   const map = useMap();
 
   useEffect(() => {
     if (!points || points.length === 0) return;
 
+    const topLeft: [number, number] = [36, 96];
+    const bottomRight: [number, number] = [36, Math.max(36, bottomInset + 24)];
+
     if (points.length === 1) {
       const only = points[0]!;
-      map.flyTo([only.lat, only.lng], Math.max(map.getZoom(), 16), { duration: 0.8 });
+      // A single point still has to clear the sheet, so it is fitted as a tiny
+      // box rather than centred.
+      map.flyToBounds(L.latLngBounds([[only.lat, only.lng], [only.lat, only.lng]]), {
+        paddingTopLeft: topLeft,
+        paddingBottomRight: bottomRight,
+        maxZoom: 17,
+        duration: 0.8,
+      });
       return;
     }
 
     const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lng]));
-    map.flyToBounds(bounds, { padding: [72, 72], maxZoom: 16, duration: 0.8 });
-  }, [points, map]);
+    map.flyToBounds(bounds, {
+      paddingTopLeft: topLeft,
+      paddingBottomRight: bottomRight,
+      maxZoom: 16,
+      duration: 0.8,
+    });
+  }, [points, bottomInset, map]);
 
   return null;
 }
@@ -438,6 +472,7 @@ export default function MapView({
   roads,
   focus,
   fitPoints,
+  bottomInset = 0,
   dark = false,
   heading = null,
   travelMode = "still",
@@ -599,7 +634,7 @@ export default function MapView({
         </Marker>
       ))}
 
-      <FitController points={fitPoints} />
+      <FitController points={fitPoints} bottomInset={bottomInset} />
       <FocusController focus={focus} zoom={16} />
     </MapContainer>
   );

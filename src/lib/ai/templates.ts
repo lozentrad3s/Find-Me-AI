@@ -143,14 +143,38 @@ interface ResolveResult {
   best?: { name?: string; address?: string; distance_m?: number | null } | null;
   question?: string | null;
   driver_instruction?: string | null;
+  /** Set when the map could not identify the place and the web was searched. */
+  web_search?: {
+    used?: boolean;
+    found_name?: string | null;
+    found_address?: string | null;
+    note?: string | null;
+  } | null;
 }
 
 export function phrasePlace(resolve: unknown, web?: WebLookup | null): string {
   const data = resolve as ResolveResult;
   const didYouMean = data.corrected_from ? "I corrected the spelling. " : "";
 
+  /*
+   * Where the answer came from is part of the answer.
+   *
+   * A place the map has never heard of, located from a web listing, is a
+   * weaker claim than a mapped one — the user should know which they are
+   * looking at before they drive there.
+   */
+  const viaWeb =
+    data.web_search?.used && data.web_search.found_name
+      ? `I couldn't find that on the map, but it's listed online as ${data.web_search.found_name}${
+          data.web_search.found_address ? `, ${data.web_search.found_address}` : ""
+        }. `
+      : "";
+
   if (data.band === "low" || !data.best) {
-    return `${didYouMean}I couldn't pin that down. Add a landmark or the area — for example "near the filling station in Wuse".`;
+    const searched = data.web_search
+      ? "I checked the map and the web and still couldn't pin that down."
+      : "I couldn't pin that down.";
+    return `${didYouMean}${searched} Add a landmark or the area — for example "near the filling station in Wuse".`;
   }
   if (data.band === "moderate" && data.question) return `${didYouMean}${data.question}`;
 
@@ -158,6 +182,10 @@ export function phrasePlace(resolve: unknown, web?: WebLookup | null): string {
     typeof data.best.distance_m === "number" ? `, ${metres(data.best.distance_m)} from you` : "";
   const about = web?.summary?.extract?.split(/(?<=[.!?])\s+/)[0];
   const photos = web && web.images.length > 0 ? " I found some photos of it." : "";
+
+  if (viaWeb) {
+    return `${didYouMean}${viaWeb}I've put it on the map${distance}.${photos} Want me to take you there?`;
+  }
 
   return `${didYouMean}Found it: ${data.best.name}${distance}.${about ? ` ${about}` : ""}${photos} Want me to take you there?`;
 }
