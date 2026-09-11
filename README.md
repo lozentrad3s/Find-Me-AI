@@ -1,6 +1,6 @@
 # Find Me — resolution engine
 
-The first buildable piece of [the master document](./find-me-master-document-v1.md): the
+The first buildable piece of the Find Me master document (kept private): the
 part that turns *"the guest house behind the mosque on Buhari Street, Wuse"* into a
 coordinate, and knows how sure it is.
 
