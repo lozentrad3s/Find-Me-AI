@@ -44,6 +44,10 @@ const MIN_INTERVAL_MS = 1200;
  * 20s+. Every entry here is one category that answers quickly rather than
  * hanging. Verify additions against the live service; do not assume a word
  * works because it seems obvious.
+ *
+ * "bus station" verified 2026-09-11: "bus station in Abuja" returns Mabushi
+ * Bus Terminal, while "motor park in Abuja" returns nothing — so the words
+ * people actually use for it all map onto the one phrase that works.
  */
 const NOMINATIM_CATEGORY: Record<string, string> = {
   "filling station": "fuel",
@@ -64,6 +68,7 @@ const NOMINATIM_CATEGORY: Record<string, string> = {
   school: "school",
   university: "university",
   "police station": "police",
+  police: "police",
   mall: "mall",
   airport: "aerodrome",
   church: "church",
@@ -71,7 +76,30 @@ const NOMINATIM_CATEGORY: Record<string, string> = {
   park: "park",
   cinema: "cinema",
   stadium: "stadium",
+  "bus station": "bus station",
+  "bus terminal": "bus station",
+  "motor park": "bus station",
+  "bus park": "bus station",
 };
+
+/**
+ * Nominatim's phrase for a category word, tolerating simple plurals — the
+ * assistant says "restaurants" as often as "restaurant", and a miss here
+ * silently sends the query to the far slower Overpass path.
+ */
+export function nominatimPhrase(keyword?: string | null): string | null {
+  if (!keyword) return null;
+  const key = keyword.trim().toLowerCase();
+  if (!key) return null;
+
+  return (
+    NOMINATIM_CATEGORY[key] ??
+    NOMINATIM_CATEGORY[key.replace(/ies$/, "y")] ??
+    NOMINATIM_CATEGORY[key.replace(/es$/, "")] ??
+    NOMINATIM_CATEGORY[key.replace(/s$/, "")] ??
+    null
+  );
+}
 
 /**
  * Build a Nominatim category query, or null when the word is not in its
@@ -83,7 +111,7 @@ export function categoryQuery(
   area?: string | null,
   city?: string | null,
 ): string | null {
-  const phrase = NOMINATIM_CATEGORY[placeType.trim().toLowerCase()];
+  const phrase = nominatimPhrase(placeType);
   if (!phrase) return null;
 
   const where = [area, city].filter(Boolean).join(", ");
@@ -92,7 +120,7 @@ export function categoryQuery(
   return `${phrase} in ${where}`;
 }
 
-interface NominatimPlace {
+export interface NominatimPlace {
   place_id: number;
   osm_type?: string;
   osm_id?: number;
@@ -108,6 +136,92 @@ interface NominatimPlace {
   boundingbox?: [string, string, string, string];
   addresstype?: string;
   address?: Record<string, string>;
+  /** Present with `extratags=1`: wikidata, image, website, opening_hours… */
+  extratags?: Record<string, string> | null;
+  /** Present with `polygon_geojson=1`. */
+  geojson?: { type: string; coordinates: unknown };
+}
+
+/**
+ * A raw Nominatim search, throttled with every other call to the host.
+ *
+ * Exported for callers that need fields the provider interface does not carry
+ * — a road's geometry, a district's bounding box — without opening a second,
+ * unthrottled path to the same rate-limited service.
+ */
+export async function nominatimSearch(
+  params: Record<string, string>,
+): Promise<NominatimPlace[]> {
+  const query = new URLSearchParams({
+    format: "jsonv2",
+    countrycodes: "ng",
+    ...params,
+  });
+
+  return throttledFetchJson<NominatimPlace[]>(`${BASE}/search?${query.toString()}`, {
+    minIntervalMs: MIN_INTERVAL_MS,
+  }).catch(() => [] as NominatimPlace[]);
+}
+
+/** Extra tags worth showing about a place: photo links, contact, hours. */
+export interface OsmExtras {
+  wikidata?: string;
+  wikipedia?: string;
+  image?: string;
+  commons?: string;
+  website?: string;
+  phone?: string;
+  openingHours?: string;
+}
+
+function toLookupId(placeId: string): string | null {
+  const match = /^osm:(node|way|relation|n|w|r):(\d+)$/i.exec(placeId);
+  if (!match) return null;
+  return `${match[1]![0]!.toUpperCase()}${match[2]}`;
+}
+
+/**
+ * Photo links and contact details for places already found, by OSM id.
+ *
+ * One request for up to twenty places. This is how a resolved hotel gets its
+ * Wikidata photo: the id came back from the search, and the tags come from
+ * here.
+ */
+export async function lookupOsmExtras(
+  placeIds: string[],
+): Promise<Map<string, OsmExtras>> {
+  const ids = [...new Set(placeIds.map(toLookupId).filter((id): id is string => Boolean(id)))]
+    .slice(0, 20);
+
+  const extras = new Map<string, OsmExtras>();
+  if (ids.length === 0) return extras;
+
+  const params = new URLSearchParams({
+    osm_ids: ids.join(","),
+    format: "jsonv2",
+    extratags: "1",
+  });
+
+  const places = await throttledFetchJson<NominatimPlace[]>(
+    `${BASE}/lookup?${params.toString()}`,
+    { minIntervalMs: MIN_INTERVAL_MS, ttlMs: 24 * 60 * 60 * 1000 },
+  ).catch(() => [] as NominatimPlace[]);
+
+  for (const place of places) {
+    const tags = place.extratags ?? {};
+    const key = `osm:${place.osm_type}:${place.osm_id}`;
+    extras.set(key, {
+      wikidata: tags.wikidata,
+      wikipedia: tags.wikipedia,
+      image: tags.image,
+      commons: tags.wikimedia_commons,
+      website: tags.website ?? tags["contact:website"],
+      phone: tags.phone ?? tags["contact:phone"],
+      openingHours: tags.opening_hours,
+    });
+  }
+
+  return extras;
 }
 
 function toLatLng(place: NominatimPlace): LatLng | null {
@@ -141,6 +255,16 @@ function toName(place: NominatimPlace): string {
   return first || "Unnamed place";
 }
 
+function toBbox(place: NominatimPlace): GeocodeResult["bbox"] {
+  const box = place.boundingbox;
+  if (!box || box.length !== 4) return undefined;
+
+  const [south, north, west, east] = box.map((value) => Number.parseFloat(value));
+  if (![south, north, west, east].every((value) => Number.isFinite(value))) return undefined;
+
+  return { south: south!, north: north!, west: west!, east: east! };
+}
+
 /**
  * How precisely this result locates a point, 0..1.
  *
@@ -166,25 +290,18 @@ function toPrecision(place: NominatimPlace): number | undefined {
       ? Math.min(1, Math.max(0, (rank - 12) / 18))
       : undefined;
 
-  const box = place.boundingbox;
+  const box = toBbox(place);
   let byExtent: number | undefined;
 
-  if (box && box.length === 4) {
-    const south = Number.parseFloat(box[0]);
-    const north = Number.parseFloat(box[1]);
-    const west = Number.parseFloat(box[2]);
-    const east = Number.parseFloat(box[3]);
+  if (box) {
+    // Rough metres across, using the larger dimension.
+    const latSpan = Math.abs(box.north - box.south) * 111_320;
+    const lngSpan =
+      Math.abs(box.east - box.west) * 111_320 * Math.cos((box.south * Math.PI) / 180);
+    const span = Math.max(latSpan, lngSpan);
 
-    if ([south, north, west, east].every(Number.isFinite)) {
-      // Rough metres across, using the larger dimension.
-      const latSpan = Math.abs(north - south) * 111_320;
-      const lngSpan =
-        Math.abs(east - west) * 111_320 * Math.cos((south * Math.PI) / 180);
-      const span = Math.max(latSpan, lngSpan);
-
-      // ~50m across is a building; ~2km is a district.
-      byExtent = span <= 50 ? 1 : span >= 2000 ? 0.1 : 1 - (span - 50) / 1950;
-    }
+    // ~50m across is a building; ~2km is a district.
+    byExtent = span <= 50 ? 1 : span >= 2000 ? 0.1 : 1 - (span - 50) / 1950;
   }
 
   if (byRank === undefined) return byExtent;
@@ -253,6 +370,9 @@ export class NominatimGeocodingProvider implements GeocodingProvider {
           point,
           precision: precisionFromRank(place.place_rank),
           components: place.address,
+          name: place.name?.trim() || undefined,
+          kind: place.addresstype ?? place.type,
+          bbox: toBbox(place),
         },
       ];
     });
@@ -282,6 +402,9 @@ export class NominatimGeocodingProvider implements GeocodingProvider {
         point: resolved,
         precision: precisionFromRank(place.place_rank),
         components: place.address,
+        name: place.name?.trim() || undefined,
+        kind: place.addresstype ?? place.type,
+        bbox: toBbox(place),
       },
     ];
   }
@@ -362,7 +485,7 @@ export class NominatimPlacesProvider implements PlacesProvider {
    * settled on, applied here so Explore and the assistant both benefit.
    */
   async nearbySearch(input: NearbySearchInput): Promise<PlaceResult[]> {
-    const phrase = input.keyword ? NOMINATIM_CATEGORY[input.keyword.trim().toLowerCase()] : null;
+    const phrase = nominatimPhrase(input.keyword);
 
     if (!phrase) return this.nearby.nearbySearch(input);
 

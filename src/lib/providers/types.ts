@@ -75,6 +75,12 @@ export interface GeocodeResult {
   precision: "rooftop" | "interpolated" | "centroid" | "approximate";
   /** Provider's own components, where available. */
   components?: Record<string, string>;
+  /** Short name of the matched feature, e.g. "Maitama". */
+  name?: string;
+  /** What kind of feature matched, e.g. "suburb", "neighbourhood". */
+  kind?: string;
+  /** Extent of the feature — a district's box, not just its centre. */
+  bbox?: { south: number; north: number; west: number; east: number };
 }
 
 export interface GeocodingProvider {

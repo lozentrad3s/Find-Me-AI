@@ -6,11 +6,15 @@
  * follows you, so the map moves instead of you dragging it. Both are the
  * difference between "a map with me on it" and "navigation".
  *
- * Heading is derived from consecutive fixes rather than taken from the device
- * compass. `deviceorientation` needs an explicit permission prompt on iOS and
- * is unreliable indoors and near vehicles; a bearing between two positions is
- * always available and is what you actually want while moving. Standing still
- * it is meaningless, which is why it is only reported above a speed floor.
+ * Two sources, best first:
+ *
+ * - The GPS's own speed and course. Phones compute these from the Doppler
+ *   shift of the satellite signal, which is far steadier than differencing
+ *   positions — it reads walking pace correctly even when successive fixes
+ *   wobble by more than a stride.
+ * - Consecutive fixes, when the device does not report speed (many desktop
+ *   browsers and some Android builds). Standing still, a bearing between two
+ *   positions is noise, which is why it is only reported above a speed floor.
  */
 
 import type { LatLng } from "@/lib/geo/distance";
@@ -27,6 +31,12 @@ export interface MovementState {
   mode: TravelMode;
   /** True when the inference is from too little data to rely on. */
   uncertain: boolean;
+}
+
+/** What the device itself reported with a fix. */
+export interface DeviceMotion {
+  speedMps: number | null;
+  heading: number | null;
 }
 
 interface Sample {
@@ -48,6 +58,9 @@ const BIKE_MAX_MPS = 7.0; // ~25 km/h
 /** How many fixes to smooth over. */
 const WINDOW = 5;
 
+/** Device speed older than this is a reading from before the user stopped. */
+const DEVICE_SPEED_MAX_AGE_MS = 8_000;
+
 export class MovementTracker {
   private samples: Sample[] = [];
 
@@ -55,8 +68,22 @@ export class MovementTracker {
   private lastMode: TravelMode = "still";
   private modeHeldSince = 0;
 
+  /** Smoothed device speed, when the device reports one. */
+  private deviceSpeed: number | null = null;
+  private deviceSpeedAt = 0;
+  private deviceHeading: number | null = null;
+
   /** Feed every position update. */
-  push(point: LatLng, accuracyM: number, at = Date.now()): MovementState {
+  push(point: LatLng, accuracyM: number, at = Date.now(), device?: DeviceMotion): MovementState {
+    if (device && typeof device.speedMps === "number" && Number.isFinite(device.speedMps)) {
+      // Light smoothing: responsive enough to show a stop within a couple of
+      // fixes, steady enough that one odd reading does not flip the mode.
+      this.deviceSpeed =
+        this.deviceSpeed === null ? device.speedMps : this.deviceSpeed * 0.5 + device.speedMps * 0.5;
+      this.deviceSpeedAt = at;
+      this.deviceHeading = device.heading;
+    }
+
     const previous = this.samples[this.samples.length - 1];
 
     /*
@@ -67,31 +94,37 @@ export class MovementTracker {
      * against the accuracy of the two fixes, since a ±2000m reading can move
      * hundreds of metres without anyone having moved at all.
      */
+    let accepted = true;
     if (previous) {
       const metres = distanceMetres(previous.point, point);
       const seconds = Math.max(0.001, (at - previous.at) / 1000);
       const noiseFloor = Math.max(previous.accuracyM, accuracyM);
 
-      if (metres < noiseFloor * 0.5) {
-        // Within the error of the fix — treat as stationary, not as motion.
-        return this.state();
-      }
-      if (metres / seconds > 90) {
-        // Over 320 km/h. Discard rather than model.
-        return this.state();
-      }
+      if (metres < noiseFloor * 0.5) accepted = false;
+      if (metres / seconds > 90) accepted = false;
     }
 
-    this.samples.push({ point, at, accuracyM });
-    if (this.samples.length > WINDOW) this.samples.shift();
+    if (accepted) {
+      this.samples.push({ point, at, accuracyM });
+      if (this.samples.length > WINDOW) this.samples.shift();
+    }
 
-    return this.state();
+    return this.state(at);
   }
 
-  /** Called when a fix arrives but nothing moved, to decay toward "still". */
-  private state(): MovementState {
+  private state(now: number): MovementState {
+    const deviceFresh =
+      this.deviceSpeed !== null && now - this.deviceSpeedAt <= DEVICE_SPEED_MAX_AGE_MS;
+
+    if (deviceFresh) {
+      const speed = this.deviceSpeed!;
+      const heading =
+        speed >= MOVING_SPEED_MPS ? this.deviceHeading ?? this.windowBearing() : null;
+      return { heading, speedMps: speed, mode: this.inferMode(speed), uncertain: false };
+    }
+
     if (this.samples.length < 2) {
-      return { heading: null, speedMps: 0, mode: "still", uncertain: true };
+      return { heading: null, speedMps: 0, mode: this.inferMode(0), uncertain: true };
     }
 
     const first = this.samples[0]!;
@@ -105,22 +138,24 @@ export class MovementTracker {
     // speed forever.
     const age = (Date.now() - last.at) / 1000;
     if (age > 15) {
-      return { heading: null, speedMps: 0, mode: "still", uncertain: false };
+      return { heading: null, speedMps: 0, mode: this.inferMode(0), uncertain: false };
     }
 
-    const heading =
-      speedMps >= MOVING_SPEED_MPS
-        ? bearingDegrees(first.point, last.point)
-        : null;
-
-    const mode = this.inferMode(speedMps);
+    const heading = speedMps >= MOVING_SPEED_MPS ? bearingDegrees(first.point, last.point) : null;
 
     return {
       heading,
       speedMps,
-      mode,
+      mode: this.inferMode(speedMps),
       uncertain: this.samples.length < 3,
     };
+  }
+
+  private windowBearing(): number | null {
+    if (this.samples.length < 2) return null;
+    const first = this.samples[0]!;
+    const last = this.samples[this.samples.length - 1]!;
+    return distanceMetres(first.point, last.point) > 3 ? bearingDegrees(first.point, last.point) : null;
   }
 
   /**
@@ -144,15 +179,13 @@ export class MovementTracker {
     const now = Date.now();
 
     if (raw === this.lastMode) {
-      this.modeHeldSince = this.modeHeldSince || now;
+      this.modeHeldSince = now;
       return this.lastMode;
     }
 
-    // "still" is allowed to appear immediately when slowing; speeding up has
-    // to be sustained.
+    // "still" is allowed to appear quickly when slowing; speeding up has to
+    // be sustained.
     const settleMs = raw === "still" ? 4000 : 6000;
-
-    if (!this.modeHeldSince) this.modeHeldSince = now;
 
     if (now - this.modeHeldSince >= settleMs) {
       this.lastMode = raw;
@@ -166,6 +199,8 @@ export class MovementTracker {
     this.samples = [];
     this.lastMode = "still";
     this.modeHeldSince = 0;
+    this.deviceSpeed = null;
+    this.deviceHeading = null;
   }
 }
 

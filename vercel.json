@@ -6,7 +6,9 @@
     "src/app/api/chat/route.ts": { "maxDuration": 60 },
     "src/app/api/resolve/route.ts": { "maxDuration": 30 },
     "src/app/api/nearby/route.ts": { "maxDuration": 30 },
-    "src/app/api/health/route.ts": { "maxDuration": 30 }
+    "src/app/api/health/route.ts": { "maxDuration": 30 },
+    "src/app/api/route/route.ts": { "maxDuration": 30 },
+    "src/app/api/traffic/tile/[z]/[x]/[y]/route.ts": { "maxDuration": 10 }
   },
   "headers": [
     {

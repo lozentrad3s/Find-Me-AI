@@ -47,8 +47,8 @@ export class TomTomTrafficProvider implements TrafficProvider {
 
   constructor(private readonly apiKey: string) {}
 
-  async sampleAlong(points: LatLng[]): Promise<RouteConditions> {
-    const chosen = pickEvenly(points, SAMPLE_COUNT);
+  async sampleAlong(points: LatLng[], count = SAMPLE_COUNT): Promise<RouteConditions> {
+    const chosen = pickEvenly(points, Math.max(1, Math.min(8, count)));
 
     if (chosen.length === 0) {
       return unavailable("No route geometry to sample.");

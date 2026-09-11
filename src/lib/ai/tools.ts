@@ -11,6 +11,11 @@
  * something in the world, and none of them should exist before the read path
  * is trustworthy. `activate_sos` in particular must never become a tool the
  * model can reach — it is a button, wired straight to the SOS path.
+ *
+ * A tool's full result goes to the app (it draws routes, pins and photo
+ * galleries from it). `forModel` trims what the model sees: geometry, step
+ * lists and image URLs are for the screen, and handing them to the model only
+ * invites it to read coordinates aloud.
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
@@ -25,6 +30,7 @@ import {
   formatDistance,
   formatDuration,
   labelRoute,
+  travelTimesFrom,
   type TravelMode,
 } from "@/lib/routing/osrm";
 import { decodePolyline } from "@/lib/geo/polyline";
@@ -32,6 +38,12 @@ import { NoTrafficProvider, type TrafficProvider } from "@/lib/traffic/types";
 import { getWeather } from "@/lib/weather/open-meteo";
 import { scanSurroundings } from "@/lib/resolution/surroundings";
 import { getJourneyWeather } from "@/lib/weather/journey";
+import { planTrip, tripForModel, type TripPlan } from "@/lib/trip/plan";
+import { checkRoadTraffic, type RoadTrafficReport } from "@/lib/traffic/roads";
+import { exploreArea, type AreaReport } from "@/lib/area/explore";
+import { lookupPlaceOnWeb, type WebLookup } from "@/lib/web/wikimedia";
+import { applyCorrections, findPlaceNames } from "@/lib/geo/gazetteer";
+import { ABUJA, localCentre } from "@/lib/geo/cities";
 
 export type RiskTier = "read" | "write" | "notify" | "emergency" | "financial";
 
@@ -43,7 +55,8 @@ export interface ToolContext {
   /** Absent means no traffic source, which the tools report honestly. */
   traffic?: TrafficProvider;
   /**
-   * How the user is currently moving, inferred from GPS speed.
+   * How the user is currently moving — inferred from GPS speed, or set by the
+   * user with the mode buttons on the map.
    *
    * Lets routing default to reality instead of assuming a car, and lets the
    * assistant skip asking a question it can already answer.
@@ -59,6 +72,16 @@ export interface AgentTool {
   description: string;
   input_schema: Anthropic.Tool.InputSchema;
   execute(input: Record<string, unknown>, context: ToolContext): Promise<unknown>;
+  /** What the model sees of the result. Defaults to all of it. */
+  forModel?(result: unknown): unknown;
+}
+
+/** The result as the model should see it. */
+export function resultForModel(tool: AgentTool | undefined, result: unknown): unknown {
+  if (!tool?.forModel || typeof result !== "object" || result === null || "error" in result) {
+    return result;
+  }
+  return tool.forModel(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +106,37 @@ const NO_LOCATION = {
     "No location available. The user has not shared their position, and no coordinates were supplied.",
 };
 
+/** How the user is moving, as a routing mode. */
+export function routingMode(travelMode: ToolContext["travelMode"]): TravelMode {
+  return travelMode === "foot" ? "walking" : travelMode === "bike" ? "cycling" : "driving";
+}
+
+/**
+ * Centre of a named district or landmark, without trusting the model's idea
+ * of where it is: the local district table first (no network), then the
+ * geocoder bounded to Abuja.
+ */
+export async function areaCentre(area: string, context: ToolContext): Promise<{ name: string; point: LatLng } | null> {
+  const match = findPlaceNames(area, ["district", "landmark"])[0];
+  const name = match?.name ?? area.trim();
+
+  const local = localCentre(name.toLowerCase(), "abuja");
+  if (local?.precision === "district") return { name, point: local.point };
+
+  const results = await context.providers.geocoding
+    .forward(`${name}, Abuja`, ABUJA.centre)
+    .catch(() => []);
+  const hit = results.find((result) => distanceMetres(result.point, ABUJA.centre) < 45_000);
+  return hit ? { name: hit.name ?? name, point: hit.point } : null;
+}
+
+/**
+ * Categories that are thin on the ground. Searching 1.5 km for a bus
+ * terminal wastes two round trips before reaching a radius that can find one.
+ */
+const SPARSE_CATEGORY =
+  /bus station|bus terminal|motor park|airport|embassy|stadium|mall|cinema|fire station|university|police/;
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
@@ -91,7 +145,7 @@ const resolvePlaceTool: AgentTool = {
   name: "resolve_place",
   tier: "read",
   description:
-    "Turn a described place into coordinates. Use this whenever the user names or describes a destination in ordinary language, including vague or landmark-based descriptions like 'the guest house behind the mosque on Buhari Street' or 'that place beside the bank'. Returns a confidence band: 'high' means act on it, 'moderate' means ask the returned question before acting, 'low' means the description is too thin and you must ask for a landmark or a nearby business. Never present a moderate or low result as a settled answer.",
+    "Turn a described place into coordinates. Use this whenever the user names or describes a destination in ordinary language, including vague or landmark-based descriptions like 'the guest house behind the mosque on Buhari Street' or 'that place beside the bank'. Returns a confidence band: 'high' means act on it, 'moderate' means ask the returned question before acting, 'low' means the description is too thin and you must ask for a landmark or a nearby business. Never present a moderate or low result as a settled answer. If `corrected_from` is set, the spelling was corrected — say 'did you mean …' once.",
   input_schema: {
     type: "object",
     properties: {
@@ -108,8 +162,13 @@ const resolvePlaceTool: AgentTool = {
     required: ["phrase"],
   },
   async execute(input, context) {
-    const phrase = String(input.phrase ?? "").trim();
-    if (!phrase) return { error: "phrase is required" };
+    const said = String(input.phrase ?? "").trim();
+    if (!said) return { error: "phrase is required" };
+
+    // Correct district and road names before searching: the geocoder has no
+    // idea that "Maintama" is Maitama, and returns nothing for it.
+    const corrections = findPlaceNames(said).filter((match) => !match.exact);
+    const phrase = applyCorrections(said, corrections);
 
     const result = await resolvePlace(phrase, context.providers, {
       context: {
@@ -121,12 +180,18 @@ const resolvePlaceTool: AgentTool = {
     return {
       band: result.band.band,
       rationale: result.band.rationale,
+      corrected_from: corrections.length > 0 ? said : null,
+      searched_for: phrase,
       best: result.best
         ? {
             name: result.best.candidate.name,
             address: result.best.candidate.formattedAddress,
             lat: result.best.candidate.point.lat,
             lng: result.best.candidate.point.lng,
+            place_id: result.best.candidate.placeId ?? null,
+            distance_m: context.currentLocation
+              ? Math.round(distanceMetres(context.currentLocation, result.best.candidate.point))
+              : null,
             confidence: Number(result.best.score.toFixed(2)),
             why: result.best.reasons,
           }
@@ -153,56 +218,132 @@ const searchNearbyTool: AgentTool = {
   name: "search_nearby",
   tier: "read",
   description:
-    "Find places of a given kind near a point — restaurants, filling stations, hospitals, banks, hotels, pharmacies, mechanics, markets. Defaults to the user's current location when no coordinates are given. Use this for 'what's around me', 'I'm hungry', 'I need fuel', and similar.",
+    "Find places of a given kind near the user, or in a named area — restaurants, filling stations, hospitals, pharmacies, banks, ATMs, hotels, bus terminals and motor parks, markets, police stations, mechanics. Results come back nearest first, with road distance and travel time for the closest ones, and are pinned on the map. Use this for 'closest restaurant', 'I'm hungry', 'I need fuel', 'restaurants in Maitama'. After answering, offer directions to the nearest one. The search widens automatically when nothing is close.",
   input_schema: {
     type: "object",
     properties: {
       category: {
         type: "string",
         description:
-          "What to look for, in plain words: 'filling station', 'hospital', 'restaurant', 'pharmacy', 'bank', 'hotel', 'mechanic'.",
+          "What to look for, in plain words: 'filling station', 'hospital', 'restaurant', 'pharmacy', 'bank', 'atm', 'hotel', 'bus station', 'police station', 'mechanic'.",
+      },
+      area: {
+        type: "string",
+        description: "Search in this district or landmark instead of around the user, e.g. 'Maitama'.",
       },
       lat: { type: "number", description: "Latitude to search around." },
       lng: { type: "number", description: "Longitude to search around." },
       radius_m: {
         type: "number",
-        description: "Search radius in metres. Default 2000, maximum 10000.",
+        description: "Search radius in metres. Leave unset to widen automatically.",
       },
     },
     required: ["category"],
   },
   async execute(input, context) {
-    const centre = readPoint(input, context);
+    const category = String(input.category ?? "").trim();
+
+    let centre: LatLng | null = null;
+    let areaName: string | null = null;
+
+    if (typeof input.area === "string" && input.area.trim()) {
+      const area = await areaCentre(input.area, context);
+      if (!area) return { error: `The area "${input.area}" was not found in Abuja.` };
+      centre = area.point;
+      areaName = area.name;
+    } else {
+      centre = readPoint(input, context);
+    }
     if (!centre) return NO_LOCATION;
 
-    const radiusM = Math.min(
-      10_000,
-      Math.max(100, typeof input.radius_m === "number" ? input.radius_m : 2000),
-    );
+    const requested =
+      typeof input.radius_m === "number"
+        ? Math.min(20_000, Math.max(200, input.radius_m))
+        : null;
 
-    const results = await context.providers.places.nearbySearch({
-      center: centre,
-      radiusM,
-      keyword: String(input.category ?? ""),
-      maxResults: 12,
-    });
+    // Widen until something turns up, instead of reporting "nothing nearby"
+    // for a pharmacy 2.6 km away.
+    const ladder = requested
+      ? [requested]
+      : SPARSE_CATEGORY.test(category.toLowerCase())
+        ? [6_000, 15_000]
+        : [1_500, 4_000, 10_000];
+
+    let results: Awaited<ReturnType<Providers["places"]["nearbySearch"]>> = [];
+    let searchedRadius = ladder[0]!;
+
+    for (const [index, radiusM] of ladder.entries()) {
+      searchedRadius = radiusM;
+      results = await context.providers.places.nearbySearch({
+        center: centre,
+        radiusM,
+        keyword: category,
+        maxResults: 15,
+      });
+      const enough = index === ladder.length - 1 ? 1 : 2;
+      if (results.length >= enough) break;
+    }
 
     if (results.length === 0) {
       return {
+        category,
+        area: areaName,
+        searched_radius_m: searchedRadius,
         results: [],
-        note: "Nothing of that kind is mapped nearby. OpenStreetMap coverage is uneven in much of Nigeria, so this may mean 'not in the map data' rather than 'not there'. Say so rather than claiming there is nothing around.",
+        note: "Nothing of that kind is mapped within the searched area. OpenStreetMap coverage is uneven in much of Nigeria, so this may mean 'not in the map data' rather than 'not there'. Say so rather than claiming there is nothing around.",
       };
     }
 
+    const sorted = results
+      .map((place) => ({ place, straight: distanceMetres(centre!, place.point) }))
+      .sort((a, b) => a.straight - b.straight)
+      .slice(0, 12);
+
+    // "Closest" by road, for the few that matter. A place just across an
+    // expressway can be the furthest drive in the list.
+    const top = sorted.slice(0, 6);
+    const times = await travelTimesFrom(
+      centre,
+      top.map((entry) => entry.place.point),
+      routingMode(context.travelMode),
+      2_500,
+    );
+
+    const enriched = sorted.map((entry, index) => {
+      const time = index < times.length ? times[index] : null;
+      return {
+        id: entry.place.placeId,
+        name: entry.place.name,
+        address: entry.place.formattedAddress || null,
+        lat: entry.place.point.lat,
+        lng: entry.place.point.lng,
+        distance_m: Math.round(entry.straight),
+        road_distance_m: time?.distanceM ?? null,
+        travel_time_s: time?.durationS ?? null,
+        travel_time_text: time ? formatDuration(time.durationS) : null,
+        types: entry.place.types,
+      };
+    });
+
+    // Re-rank the timed ones by road distance; untimed stay in straight-line order after them.
+    const timed = enriched.filter((place) => place.road_distance_m !== null);
+    const untimed = enriched.filter((place) => place.road_distance_m === null);
+    timed.sort((a, b) => a.road_distance_m! - b.road_distance_m!);
+    const ordered = [...timed, ...untimed];
+
     return {
-      results: results.map((place) => ({
-        name: place.name,
-        address: place.formattedAddress || null,
-        lat: place.point.lat,
-        lng: place.point.lng,
-        distance_m: Math.round(distanceMetres(centre, place.point)),
-        types: place.types,
-      })),
+      category,
+      area: areaName,
+      searched_radius_m: searchedRadius,
+      nearest: ordered[0]?.name ?? null,
+      results: ordered,
+    };
+  },
+  forModel(result) {
+    const data = result as { results?: Array<Record<string, unknown>> } & Record<string, unknown>;
+    return {
+      ...data,
+      results: (data.results ?? []).map(({ types: _types, id: _id, ...rest }) => rest),
     };
   },
 };
@@ -230,11 +371,58 @@ const whereAmITool: AgentTool = {
   },
 };
 
+const planTripTool: AgentTool = {
+  name: "plan_trip",
+  tier: "read",
+  description:
+    "Plan a trip from the user's current location to a destination AND start live navigation on the map. Returns the route (distance, time, arrival time, main roads), live traffic on the route, weather at both ends, community incident reports along the way, and safety notes. Use this whenever the user wants to go somewhere: 'take me there', 'directions to X', 'how do I get to X', 'how far is X', or 'yes' after you offered directions. It needs the destination's coordinates: use a place already listed under PLACES ON SCREEN, or call resolve_place / search_nearby first — never guess coordinates. Report it in two or three spoken sentences: time and arrival, the main road, traffic (only if a reading came back), weather if it matters, and any incident or safety note.",
+  input_schema: {
+    type: "object",
+    properties: {
+      to_lat: { type: "number", description: "Destination latitude." },
+      to_lng: { type: "number", description: "Destination longitude." },
+      to_name: { type: "string", description: "Destination name, for the map and the spoken summary." },
+      mode: {
+        type: "string",
+        enum: ["driving", "walking", "cycling"],
+        description: "Travel mode. Leave unset to use how the user is currently travelling.",
+      },
+    },
+    required: ["to_lat", "to_lng"],
+  },
+  async execute(input, context) {
+    const origin = context.currentLocation;
+    if (!origin) return NO_LOCATION;
+
+    const toLat = input.to_lat;
+    const toLng = input.to_lng;
+    if (typeof toLat !== "number" || typeof toLng !== "number") {
+      return { error: "to_lat and to_lng are required numbers." };
+    }
+
+    const mode: TravelMode =
+      input.mode === "walking" || input.mode === "cycling" || input.mode === "driving"
+        ? (input.mode as TravelMode)
+        : routingMode(context.travelMode);
+
+    return planTrip({
+      origin,
+      destination: { lat: toLat, lng: toLng },
+      destinationName: typeof input.to_name === "string" ? input.to_name : null,
+      mode,
+      traffic: context.traffic,
+    });
+  },
+  forModel(result) {
+    return tripForModel(result as TripPlan);
+  },
+};
+
 const routeTool: AgentTool = {
   name: "calculate_route",
   tier: "read",
   description:
-    "Work out the route, distance and travel time between two points. Origin defaults to the user's current location. Call resolve_place first to turn a described destination into coordinates — never guess them.",
+    "Distance and travel time between two arbitrary points, without starting navigation. Prefer plan_trip whenever the user wants to go somewhere; use this only to compare or answer 'how far is A from B' when neither end is the user.",
   input_schema: {
     type: "object",
     properties: {
@@ -245,7 +433,7 @@ const routeTool: AgentTool = {
       mode: {
         type: "string",
         enum: ["driving", "walking", "cycling"],
-        description: "Travel mode. Default driving.",
+        description: "Travel mode. Default: how the user is travelling.",
       },
     },
     required: ["to_lat", "to_lng"],
@@ -264,24 +452,10 @@ const routeTool: AgentTool = {
       return { error: "to_lat and to_lng are required numbers." };
     }
 
-    /*
-     * Default to how the user is actually moving.
-     *
-     * Routing a pedestrian along a motorway because the tool assumed a car is
-     * both wrong and unsafe, and the speed data to know better is already
-     * being collected.
-     */
-    const inferred: TravelMode =
-      context.travelMode === "foot"
-        ? "walking"
-        : context.travelMode === "bike"
-          ? "cycling"
-          : "driving";
-
     const mode: TravelMode =
       input.mode === "walking" || input.mode === "cycling" || input.mode === "driving"
         ? (input.mode as TravelMode)
-        : inferred;
+        : routingMode(context.travelMode);
 
     const route = await computeRoute(origin, { lat: toLat, lng: toLng }, mode);
 
@@ -312,13 +486,19 @@ const routeTool: AgentTool = {
       steps: route.steps.slice(0, 12),
     };
   },
+  forModel(result) {
+    const { geometry: _geometry, steps, ...rest } = result as Record<string, unknown> & {
+      steps?: Array<{ instruction: string; name: string }>;
+    };
+    return { ...rest, main_roads: [...new Set((steps ?? []).map((s) => s.name).filter(Boolean))].slice(0, 4) };
+  },
 };
 
 const routeConditionsTool: AgentTool = {
   name: "check_route_conditions",
   tier: "read",
   description:
-    "Check traffic and compare alternative routes between two points. Use this for any question about traffic, congestion, delays, or whether a route is clear — for example 'is there traffic on the Maitama route from Dutse'. Origin defaults to the user's current location. Resolve place descriptions with resolve_place first. IMPORTANT: read `traffic.available` in the result. When it is false there is NO live traffic data and you must say so plainly — never describe conditions as light, moderate or heavy unless a reading actually came back.",
+    "Compare traffic on alternative routes between two points without starting navigation. For a trip the user is about to take, use plan_trip (it already includes traffic). For traffic on a named road, use check_road_traffic. IMPORTANT: read `traffic.available` in the result. When it is false there is NO live traffic data and you must say so plainly — never describe conditions as light, moderate or heavy unless a reading actually came back.",
   input_schema: {
     type: "object",
     properties: {
@@ -394,13 +574,149 @@ const routeConditionsTool: AgentTool = {
         : "No live traffic data. Report the free-flow estimate as an estimate, say traffic is unknown, and do not characterise congestion.",
     };
   },
+  forModel(result) {
+    const data = result as { primary_route?: Record<string, unknown> } & Record<string, unknown>;
+    if (!data.primary_route) return data;
+    const { geometry: _geometry, ...primary } = data.primary_route;
+    return { ...data, primary_route: primary };
+  },
+};
+
+const roadTrafficTool: AgentTool = {
+  name: "check_road_traffic",
+  tier: "read",
+  description:
+    "Live traffic on one or more named roads or junctions — 'is there traffic on Sani Abacha Way', 'how is Murtala road', 'any go-slow at Berger'. Finds each road in the map by name (spelling-corrected), samples live speeds along it, and colours it on the map. Use this for a question about a road, not about a journey. Read each report: status 'not_built' means the road only exists as a plan; 'not_found' means ask for the full name or a landmark on it; traffic.available false means there is no live traffic data — say so, never guess.",
+  input_schema: {
+    type: "object",
+    properties: {
+      roads: {
+        type: "array",
+        items: { type: "string" },
+        description: "Road or junction names as the user said them, up to three.",
+      },
+    },
+    required: ["roads"],
+  },
+  async execute(input, context) {
+    const roads = Array.isArray(input.roads)
+      ? input.roads.filter((road): road is string => typeof road === "string" && road.trim() !== "")
+      : typeof input.roads === "string"
+        ? [input.roads]
+        : [];
+
+    if (roads.length === 0) return { error: "Name at least one road." };
+
+    const traffic = context.traffic ?? new NoTrafficProvider();
+    const reports = await Promise.all(
+      roads.slice(0, 3).map((road) => checkRoadTraffic(road, traffic)),
+    );
+
+    return { roads: reports };
+  },
+  forModel(result) {
+    const data = result as { roads: RoadTrafficReport[] };
+    return {
+      roads: data.roads.map((report) => ({
+        asked: report.query,
+        road: report.road,
+        corrected_from: report.corrected_from,
+        status: report.status,
+        road_class: report.road_class,
+        traffic_available: report.traffic.available,
+        level: report.traffic.level,
+        worst_stretch: report.traffic.worst_level,
+        closure: report.traffic.closure,
+        summary: report.traffic.summary,
+        readings_taken: report.traffic.readings.length,
+        note: report.note,
+      })),
+    };
+  },
+};
+
+const exploreAreaTool: AgentTool = {
+  name: "explore_area",
+  tier: "read",
+  description:
+    "Describe a district or neighbourhood of Abuja — what it is, its best-known landmarks, named junctions and main roads — and show photos. Use this for 'where is Maitama', 'tell me about Wuse 2', 'what's in Garki', or a district name on its own. It corrects misspellings (Maintama → Maitama): when `corrected_from` is set, open with 'Did you mean <name>?' and carry on answering about <name>. Mention three or four landmarks and one or two main roads or junctions so the user can pinpoint the part they want, then ask which part they are heading to or offer directions.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "The district or area, as the user said it." },
+    },
+    required: ["name"],
+  },
+  async execute(input, context) {
+    const name = String(input.name ?? "").trim();
+    if (!name) return { error: "name is required" };
+    return exploreArea(name, context.providers);
+  },
+  forModel(result) {
+    const report = result as AreaReport;
+    return {
+      name: report.name,
+      corrected_from: report.corrected_from,
+      found: report.found,
+      description: report.description,
+      landmarks: report.landmarks.map((landmark) => `${landmark.name} (${landmark.category})`),
+      junctions: report.junctions,
+      main_roads: report.main_roads,
+      photos_shown: report.images.length,
+      note: report.note,
+    };
+  },
+};
+
+const webLookupTool: AgentTool = {
+  name: "web_lookup",
+  tier: "read",
+  description:
+    "Look a named place up on the web (Wikipedia and Wikimedia) for a short description and photos, which the app shows as a gallery. Use it together with resolve_place when the user asks about a specific named place or types an address, and when they ask what somewhere looks like. Small businesses usually have no web entry: when `summary` is null, say you found no description online. Never describe a place's appearance yourself — the photos speak for it.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Name of the place." },
+      area: { type: "string", description: "District or city it is in, if known." },
+      lat: { type: "number", description: "Where the place is, if already resolved." },
+      lng: { type: "number", description: "Where the place is, if already resolved." },
+    },
+    required: ["name"],
+  },
+  async execute(input) {
+    const name = String(input.name ?? "").trim();
+    if (!name) return { error: "name is required" };
+
+    const near =
+      typeof input.lat === "number" && typeof input.lng === "number"
+        ? { lat: input.lat, lng: input.lng }
+        : ABUJA.centre;
+
+    const lookup = await lookupPlaceOnWeb({
+      name,
+      area: typeof input.area === "string" ? input.area : "Abuja",
+      near,
+    });
+
+    return { name, ...lookup };
+  },
+  forModel(result) {
+    const data = result as WebLookup & { name: string };
+    return {
+      name: data.name,
+      summary: data.summary?.extract ?? null,
+      source: data.summary?.url ?? null,
+      photos_shown: data.images.length,
+      note: data.note,
+    };
+  },
 };
 
 const scanSurroundingsTool: AgentTool = {
   name: "scan_surroundings",
   tier: "read",
   description:
-    "Full scan of what is around a point: the street, the district, the most recognisable nearby landmark, and everything named within 400m with distances and compass directions. Defaults to the user's location. Use this when the user asks where they are, says they are lost, needs to describe their position to someone else, or when a resolved place needs to be explained by its surroundings. IMPORTANT: read `data_gaps` and obey it. Building colours are NOT in the map data anywhere in Nigeria — never describe the colour of a building, and never invent a detail the scan did not return.",
+    "Full scan of what is around a point: the street, the district, the most recognisable nearby landmark, and everything named within 800m with distances and compass directions. Defaults to the user's location. Use this when the user asks where they are, says they are lost, needs to describe their position to someone else, or when a resolved place needs to be explained by its surroundings. IMPORTANT: read `data_gaps` and obey it. Building colours are NOT in the map data anywhere in Nigeria — never describe the colour of a building, and never invent a detail the scan did not return.",
   input_schema: {
     type: "object",
     properties: {
@@ -441,22 +757,33 @@ const weatherTool: AgentTool = {
   name: "get_weather",
   tier: "read",
   description:
-    "Current conditions and a five-day forecast for a point, defaulting to the user's location. Use this for any question about weather, rain, heat or whether to set off now. Also worth calling unprompted when the user is planning a journey and `travel_advisory` would change their decision — in Abuja's rainy season a downpour is a real routing factor, not small talk.",
+    "Current conditions and a five-day forecast, at the user's location or at a named place ('weather in Maitama'). Use this for any question about weather, rain, heat or whether to set off now — and only for those: 'where is Maitama' is a place question, not a weather one. Also worth calling unprompted when the user is planning a journey and `travel_advisory` would change their decision — in Abuja's rainy season a downpour is a real routing factor, not small talk.",
   input_schema: {
     type: "object",
     properties: {
+      place: { type: "string", description: "A named place to get weather for, e.g. 'Maitama'. Omit for the user's location." },
       lat: { type: "number", description: "Latitude. Defaults to the user." },
       lng: { type: "number", description: "Longitude. Defaults to the user." },
     },
   },
   async execute(input, context) {
-    const point = readPoint(input, context);
+    let point = readPoint(input, context);
+    let placeName: string | null = null;
+
+    if (typeof input.place === "string" && input.place.trim()) {
+      const area = await areaCentre(input.place, context);
+      if (!area) return { error: `"${input.place}" was not found in Abuja, so there is no weather to report for it.` };
+      point = area.point;
+      placeName = area.name;
+    }
+
     if (!point) return NO_LOCATION;
 
     const report = await getWeather(point);
     if (!report) return { error: "Weather data is unavailable right now." };
 
     return {
+      place: placeName ?? "your location",
       current: {
         temperature_c: Math.round(report.current.temperatureC),
         feels_like_c: Math.round(report.current.feelsLikeC),
@@ -545,6 +872,10 @@ const journeyWeatherTool: AgentTool = {
 export const AGENT_TOOLS: AgentTool[] = [
   resolvePlaceTool,
   searchNearbyTool,
+  planTripTool,
+  exploreAreaTool,
+  webLookupTool,
+  roadTrafficTool,
   whereAmITool,
   routeTool,
   routeConditionsTool,

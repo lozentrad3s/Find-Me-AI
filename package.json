@@ -11,7 +11,8 @@
     "harness:jos": "tsx src/harness/env-mock.ts --city=jos",
     "harness:abuja": "tsx src/harness/env-mock.ts --city=abuja",
     "typecheck": "tsc --noEmit",
-    "harness:models": "tsx src/harness/compare.ts"
+    "harness:models": "tsx src/harness/compare.ts",
+    "harness:intents": "tsx src/harness/intents.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

@@ -1,7 +1,8 @@
 /**
  * GET /api/nearby?lat=..&lng=..&category=..&radius=..
  *
- * Category browse for the Explore tab.
+ * Category browse for the Explore tab, the Home quick actions and the chips
+ * on the map.
  *
  * Deliberately independent of the assistant. Browsing by category needs no
  * language understanding at all, so making it go through the AI would add
@@ -16,8 +17,15 @@ import { DEFAULT_CITY } from "@/lib/geo/cities";
 
 export const runtime = "nodejs";
 
-const MAX_RADIUS_M = 10_000;
+const MAX_RADIUS_M = 15_000;
 const DEFAULT_RADIUS_M = 2_500;
+
+/**
+ * Thin on the ground in Abuja's map data. Starting these at 2.5 km spends two
+ * slow searches before reaching a radius that can find one — the map had
+ * three bus terminals within 12 km of the city centre when this was measured.
+ */
+const SPARSE = /bus station|bus terminal|motor park|airport|embassy|stadium|mall|cinema|fire station|police/;
 
 export async function GET(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
@@ -33,15 +41,17 @@ export async function GET(request: Request): Promise<Response> {
   const category = (searchParams.get("category") ?? "").trim();
 
   const requested = Number.parseInt(searchParams.get("radius") ?? "", 10);
-  const radiusM = Number.isFinite(requested)
+  const firstRadius = Number.isFinite(requested)
     ? Math.min(MAX_RADIUS_M, Math.max(200, requested))
-    : DEFAULT_RADIUS_M;
+    : SPARSE.test(category.toLowerCase())
+      ? 6_000
+      : DEFAULT_RADIUS_M;
 
   try {
     const providers = buildProviders();
 
     /*
-     * Widen once before giving up.
+     * Widen before giving up.
      *
      * Abuja is spread out and POI density varies enormously by district —
      * a pharmacy search around Maitama found nothing at 2.5km while Garki
@@ -49,17 +59,16 @@ export async function GET(request: Request): Promise<Response> {
      * 4km away", and the user can judge whether that is too far far better
      * than an arbitrary radius can.
      */
+    let usedRadiusM = firstRadius;
     let results = await providers.places.nearbySearch({
       center: centre,
-      radiusM,
+      radiusM: usedRadiusM,
       keyword: category || undefined,
       maxResults: 20,
     });
 
-    let usedRadiusM = radiusM;
-
-    if (results.length === 0 && radiusM < MAX_RADIUS_M) {
-      usedRadiusM = Math.min(MAX_RADIUS_M, radiusM * 2.5);
+    while (results.length === 0 && usedRadiusM < MAX_RADIUS_M) {
+      usedRadiusM = Math.min(MAX_RADIUS_M, Math.round(usedRadiusM * 2.5));
       results = await providers.places.nearbySearch({
         center: centre,
         radiusM: usedRadiusM,
@@ -82,7 +91,7 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({
       centre,
       radiusM: usedRadiusM,
-      widened: usedRadiusM !== radiusM,
+      widened: usedRadiusM !== firstRadius,
       category: category || null,
       count: places.length,
       places,

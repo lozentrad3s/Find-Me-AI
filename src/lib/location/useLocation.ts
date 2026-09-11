@@ -12,19 +12,22 @@
  * has location":
  *
  * 1. Check the Permissions API first. When permission is already granted, the
- *    position can be fetched immediately on load with no prompt at all. That
- *    is the returning-user path and it should be silent.
+ *    position can be fetched immediately on load with no prompt at all.
  * 2. Watch rather than poll. `watchPosition` delivers updates as the fix
- *    improves — the first reading is often a coarse network estimate and GPS
- *    refines it seconds later. A one-shot call frequently captures the coarse
- *    one and keeps it forever.
- * 3. Keep the best fix, not the newest. Accuracy fluctuates, and letting a
- *    ±2000m reading overwrite a ±15m one makes the pin visibly jump.
+ *    improves and as the user moves.
+ * 3. Reject only fixes that are clearly worse, not every fix that is slightly
+ *    less accurate. An earlier version kept "the best fix", which is right for
+ *    a stationary pin and wrong for a moving one: walking along a street, each
+ *    new reading was a few metres less precise than the last good one and was
+ *    thrown away, so the icon sat still and then jumped. Now a coarse network
+ *    fix cannot overwrite a GPS lock, and a physically impossible jump is
+ *    discarded — everything else is accepted, so the marker moves as you do.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { LatLng } from "@/lib/geo/distance";
+import { distanceMetres } from "@/lib/geo/distance";
 
 export type LocationStatus =
   | "idle"
@@ -41,33 +44,72 @@ export interface UseLocation {
   error: string | null;
   /** Explicitly ask, for a button. Safe to call when already granted. */
   request: () => void;
+  /** Direction of travel from the GPS, degrees from north; null when unknown or still. */
+  heading: number | null;
+  /** Speed from the GPS in m/s; null when the device does not report it. */
+  speedMps: number | null;
+  /** When the last accepted fix was taken. */
+  fixAt: number | null;
 }
 
-/** A newer fix must be this much worse before it is allowed to replace a good one. */
-const ACCURACY_TOLERANCE = 1.5;
-/** Beyond this age, even a worse reading is preferable to a stale one. */
+/** A GPS lock is this good or better. */
+const LOCK_ACCURACY_M = 60;
+/** A reading this coarse is a network estimate, not GPS. */
+const COARSE_ACCURACY_M = 150;
+/** Beyond this age, even a coarse reading is preferable to a stale lock. */
 const STALE_AFTER_MS = 60_000;
+/** Faster than this, beyond the fixes' own error, is a glitch, not a car. */
+const MAX_PLAUSIBLE_MPS = 75;
+/** GPS heading is noise below walking pace. */
+const HEADING_MIN_SPEED_MPS = 0.8;
 
 export function useLocation(): UseLocation {
   const [point, setPoint] = useState<LatLng | null>(null);
   const [accuracyM, setAccuracyM] = useState<number | null>(null);
   const [status, setStatus] = useState<LocationStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [heading, setHeading] = useState<number | null>(null);
+  const [speedMps, setSpeedMps] = useState<number | null>(null);
+  const [fixAt, setFixAt] = useState<number | null>(null);
 
-  const bestRef = useRef<{ accuracy: number; at: number } | null>(null);
+  const lastRef = useRef<{ point: LatLng; accuracy: number; at: number } | null>(null);
   const watchRef = useRef<number | null>(null);
 
   const accept = useCallback((position: GeolocationPosition) => {
-    const accuracy = position.coords.accuracy;
-    const best = bestRef.current;
-    const stale = best ? Date.now() - best.at > STALE_AFTER_MS : true;
+    const { accuracy, latitude, longitude } = position.coords;
+    const at = position.timestamp || Date.now();
+    const next = { lat: latitude, lng: longitude };
+    const last = lastRef.current;
 
-    // Keep the better fix unless the one we hold has gone stale.
-    if (best && !stale && accuracy > best.accuracy * ACCURACY_TOLERANCE) return;
+    if (last) {
+      const fresh = at - last.at < STALE_AFTER_MS;
 
-    bestRef.current = { accuracy, at: Date.now() };
-    setPoint({ lat: position.coords.latitude, lng: position.coords.longitude });
+      // A network estimate arriving after a GPS lock would drag the pin
+      // hundreds of metres for no reason.
+      if (fresh && accuracy > COARSE_ACCURACY_M && last.accuracy <= LOCK_ACCURACY_M) return;
+
+      const seconds = Math.max(0.5, (at - last.at) / 1000);
+      const moved = distanceMetres(last.point, next) - accuracy - last.accuracy;
+      if (moved / seconds > MAX_PLAUSIBLE_MPS) return;
+    }
+
+    lastRef.current = { point: next, accuracy, at };
+
+    const speed = position.coords.speed;
+    const course = position.coords.heading;
+    const validSpeed = typeof speed === "number" && Number.isFinite(speed) && speed >= 0 ? speed : null;
+    const validHeading =
+      typeof course === "number" &&
+      Number.isFinite(course) &&
+      (validSpeed ?? 0) >= HEADING_MIN_SPEED_MPS
+        ? course
+        : null;
+
+    setPoint(next);
     setAccuracyM(Math.round(accuracy));
+    setSpeedMps(validSpeed);
+    setHeading(validHeading);
+    setFixAt(at);
     setStatus("granted");
     setError(null);
   }, []);
@@ -98,8 +140,8 @@ export function useLocation(): UseLocation {
     watchRef.current = navigator.geolocation.watchPosition(accept, fail, {
       enableHighAccuracy: true,
       timeout: 20_000,
-      // Accept a recent cached fix immediately, then let the watch refine it.
-      maximumAge: 15_000,
+      // Live movement needs live fixes; a cached one is a position from the past.
+      maximumAge: 2_000,
     });
   }, [accept, fail]);
 
@@ -113,7 +155,7 @@ export function useLocation(): UseLocation {
     setStatus((current) => (current === "granted" ? current : "prompting"));
 
     // One immediate read so there is a position within a second or two, then
-    // the watch takes over and improves it.
+    // the watch takes over and keeps it moving.
     navigator.geolocation.getCurrentPosition(accept, fail, {
       enableHighAccuracy: true,
       timeout: 15_000,
@@ -182,5 +224,5 @@ export function useLocation(): UseLocation {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { point, accuracyM, status, error, request };
+  return { point, accuracyM, status, error, request, heading, speedMps, fixAt };
 }

@@ -1,13 +1,16 @@
 "use client";
 
 /**
- * The assistant panel: conversation, voice, and the tool trace.
+ * The assistant panel: the conversation, rich result cards, voice, and the
+ * tool trace.
  *
  * The trace is shown on purpose rather than hidden behind a spinner. Part IV
  * insists the model never invents a location, and letting the user watch which
- * tool ran is what makes that claim checkable instead of a promise. It also
- * turns the genuine wait — Nominatim allows about one call per second — into
- * visible progress.
+ * tool ran is what makes that claim checkable instead of a promise.
+ *
+ * Replies stream in as they are generated, and the cards (places, photos,
+ * routes) arrive the moment their tool returns — often before the sentence
+ * describing them — so a result is on screen as soon as it exists.
  */
 
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
@@ -15,16 +18,20 @@ import {
   ArrowUp,
   ChevronDown,
   Compass,
+  Globe,
+  Map as MapIcon,
   MapPin,
   Mic,
   Navigation,
   Route,
   Search,
+  TrafficCone,
   Volume2,
   VolumeX,
   X,
 } from "lucide-react";
 
+import Cards, { type CardPlace, type ChatCard } from "./chat/Cards";
 import styles from "./Assistant.module.css";
 
 export interface TraceItem {
@@ -36,6 +43,7 @@ export interface ChatTurn {
   role: "user" | "assistant";
   content: string;
   trace?: TraceItem[];
+  cards?: ChatCard[];
 }
 
 export interface AssistantProps {
@@ -43,6 +51,10 @@ export interface AssistantProps {
   busy: boolean;
   /** Live trace for the turn currently being generated. */
   liveTrace: TraceItem[];
+  /** The reply so far, while it streams. */
+  liveReply?: string;
+  /** Cards that have arrived for the turn in progress. */
+  liveCards?: ChatCard[];
   notice: string | null;
   voice: {
     supported: boolean;
@@ -63,6 +75,12 @@ export interface AssistantProps {
   onClose?: () => void;
   /** True when rendered inside the bottom sheet, which owns the chrome. */
   embedded?: boolean;
+  onDirections?: (place: CardPlace) => void;
+  onShowPlace?: (place: CardPlace) => void;
+  /** Changes whenever the composer should take focus (tapping the search bar). */
+  focusSignal?: number;
+  /** A trip is running; quick replies about going somewhere are hidden. */
+  tripActive?: boolean;
 }
 
 export interface UsageReadout {
@@ -76,18 +94,23 @@ export interface UsageReadout {
 }
 
 const SUGGESTIONS = [
-  "Where am I?",
-  "Find a filling station near me",
-  "Take me to the guest house behind the mosque on Buhari Street, Wuse",
-  "Any pharmacy around here?",
+  "Closest restaurant to me",
+  "Where is Maitama?",
+  "Is there traffic on Sani Abacha Way?",
+  "Take me to Jabi Lake Mall",
+  "Nearest bus terminal",
 ];
 
 const TOOL_LABEL: Record<string, { label: string; Icon: typeof MapPin }> = {
-  resolve_place: { label: "Resolving place", Icon: MapPin },
+  resolve_place: { label: "Finding the place", Icon: MapPin },
   search_nearby: { label: "Searching nearby", Icon: Search },
   where_am_i: { label: "Locating you", Icon: Compass },
+  plan_trip: { label: "Planning the trip", Icon: Navigation },
   calculate_route: { label: "Working out the route", Icon: Route },
   check_route_conditions: { label: "Checking the route", Icon: Route },
+  check_road_traffic: { label: "Checking traffic", Icon: TrafficCone },
+  explore_area: { label: "Exploring the area", Icon: MapIcon },
+  web_lookup: { label: "Searching the web", Icon: Globe },
   scan_surroundings: { label: "Scanning your surroundings", Icon: Compass },
   get_weather: { label: "Checking the weather", Icon: Search },
   check_journey_weather: { label: "Checking weather ahead", Icon: Route },
@@ -99,10 +122,26 @@ const BAND_LABEL = {
   low: "Not enough detail",
 } as const;
 
+/** The obvious next thing to say, offered as a tap. */
+function quickRepliesFor(turn: ChatTurn | undefined, tripActive: boolean): string[] {
+  if (!turn || turn.role !== "assistant" || !turn.cards?.length || tripActive) return [];
+
+  const area = turn.cards.find((card) => card.type === "area");
+  if (area && area.type === "area") {
+    return [`Take me to ${area.name}`, `Restaurants in ${area.name}`];
+  }
+  if (turn.cards.some((card) => card.type === "trip")) return [];
+  if (turn.cards.some((card) => card.type === "place")) return ["Take me there", "What's around it?"];
+  if (turn.cards.some((card) => card.type === "places")) return ["Take me to the closest one", "Show me more"];
+  return [];
+}
+
 export default function Assistant({
   turns,
   busy,
   liveTrace,
+  liveReply = "",
+  liveCards = [],
   notice,
   voice,
   speakReplies,
@@ -113,16 +152,34 @@ export default function Assistant({
   onOpenVoice,
   onClose,
   embedded = false,
+  onDirections = () => undefined,
+  onShowPlace = () => undefined,
+  focusSignal,
+  tripActive = false,
 }: AssistantProps) {
   const [draft, setDraft] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Follow the conversation as it grows, including mid-stream.
   useEffect(() => {
     const thread = threadRef.current;
     if (thread) thread.scrollTop = thread.scrollHeight;
-  }, [turns, liveTrace, busy]);
+  }, [turns, liveTrace, liveReply, liveCards, busy]);
+
+  // Tapping the search bar opens the chat ready to type, keyboard up.
+  useEffect(() => {
+    if (focusSignal) inputRef.current?.focus();
+  }, [focusSignal]);
+
+  // Grow with the message, up to the CSS max-height.
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${input.scrollHeight}px`;
+  }, [draft]);
 
   function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -139,6 +196,9 @@ export default function Assistant({
       submit();
     }
   }
+
+  const lastTurn = turns[turns.length - 1];
+  const quickReplies = busy ? [] : quickRepliesFor(lastTurn, tripActive);
 
   return (
     <section
@@ -210,9 +270,8 @@ export default function Assistant({
             <div className={styles.empty}>
               <p className={styles.emptyTitle}>Where are you trying to get to?</p>
               <p className={styles.emptyBody}>
-                Describe it however you would say it out loud — landmarks, a
-                nearby shop, &ldquo;behind the mosque&rdquo;. You do not need a
-                formal address.
+                Ask like you would ask a person — a place, an area, &ldquo;the closest
+                pharmacy&rdquo;, or traffic on a road. You do not need a formal address.
               </p>
 
               <div className={styles.suggestions}>
@@ -238,20 +297,43 @@ export default function Assistant({
               className={styles.message}
               data-role={turn.role}
             >
-              <div className={styles.bubble}>{turn.content}</div>
-              {turn.trace && turn.trace.length > 0 && (
-                <Trace items={turn.trace} />
+              {turn.trace && turn.trace.length > 0 && <Trace items={turn.trace} />}
+              {turn.cards && turn.cards.length > 0 && (
+                <Cards cards={turn.cards} onDirections={onDirections} onShow={onShowPlace} />
               )}
+              {turn.content && <div className={styles.bubble}>{turn.content}</div>}
             </div>
           ))}
 
           {busy && (
             <div className={styles.message} data-role="assistant">
               {liveTrace.length > 0 && <Trace items={liveTrace} />}
-              <span className={styles.thinking}>
-                <span className={styles.spinner} aria-hidden="true" />
-                {liveTrace.length > 0 ? "Reading the results" : "Thinking"}
-              </span>
+              {liveCards.length > 0 && (
+                <Cards cards={liveCards} onDirections={onDirections} onShow={onShowPlace} />
+              )}
+              {liveReply.trim() ? (
+                <div className={styles.bubble}>{liveReply}</div>
+              ) : (
+                <span className={styles.thinking}>
+                  <span className={styles.spinner} aria-hidden="true" />
+                  {liveTrace.length > 0 ? "Reading the results" : "Thinking"}
+                </span>
+              )}
+            </div>
+          )}
+
+          {quickReplies.length > 0 && (
+            <div className={styles.quickReplies}>
+              {quickReplies.map((reply) => (
+                <button
+                  key={reply}
+                  type="button"
+                  className={styles.quickReply}
+                  onClick={() => onSend(reply)}
+                >
+                  {reply}
+                </button>
+              ))}
             </div>
           )}
 
@@ -278,13 +360,14 @@ export default function Assistant({
           </label>
           <textarea
             id="fm-composer"
+            ref={inputRef}
             className={styles.input}
             rows={1}
             value={draft}
-            placeholder="Ask Find Me…"
+            placeholder="Ask Find Me anything…"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onKeyDown}
-            disabled={busy}
+            enterKeyHint="send"
           />
 
           <button
@@ -292,7 +375,6 @@ export default function Assistant({
             className={styles.mic}
             data-listening={voice.listening}
             onClick={onOpenVoice}
-            disabled={busy}
             title="Talk to Find Me"
           >
             <Mic size={18} />
@@ -327,9 +409,7 @@ export default function Assistant({
  *
  * Visible on purpose while the model choice is still being decided: the whole
  * question of whether a cheap model is good enough is unanswerable without
- * seeing what each turn actually spends. `cached` is the one to watch — if it
- * never appears, the prompt prefix is too short to cache and every turn is
- * paying full price for the same system prompt.
+ * seeing what each turn actually spends.
  */
 function UsageLine({ usage }: { usage: UsageReadout }) {
   const cents = usage.estimatedCostUsd * 100;

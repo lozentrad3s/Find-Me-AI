@@ -46,3 +46,36 @@ export function decodePolyline(encoded: string, precision = 5): LatLng[] {
 
   return points;
 }
+
+/**
+ * The inverse of `decodePolyline`, for sending geometry the server built
+ * itself — a road looked up by name — in the same compact form OSRM uses.
+ */
+export function encodePolyline(points: LatLng[], precision = 5): string {
+  const factor = 10 ** precision;
+  let lastLat = 0;
+  let lastLng = 0;
+  let encoded = "";
+
+  for (const point of points) {
+    const lat = Math.round(point.lat * factor);
+    const lng = Math.round(point.lng * factor);
+    encoded += encodeSigned(lat - lastLat) + encodeSigned(lng - lastLng);
+    lastLat = lat;
+    lastLng = lng;
+  }
+
+  return encoded;
+}
+
+function encodeSigned(value: number): string {
+  let shifted = value << 1;
+  if (value < 0) shifted = ~shifted;
+
+  let chunk = "";
+  while (shifted >= 0x20) {
+    chunk += String.fromCharCode((0x20 | (shifted & 0x1f)) + 63);
+    shifted >>= 5;
+  }
+  return chunk + String.fromCharCode(shifted + 63);
+}

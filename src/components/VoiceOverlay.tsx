@@ -44,17 +44,21 @@ export interface VoiceOverlayProps {
 
 const SUGGESTIONS = [
   "Where am I?",
-  "Is there traffic on my route?",
-  "Find me a filling station",
-  "Take me to Bluewiz",
+  "Closest restaurant to me",
+  "Is there traffic on Sani Abacha Way?",
+  "Where is Maitama?",
 ];
 
 const TOOL_LABEL: Record<string, { label: string; Icon: typeof MapPin }> = {
   resolve_place: { label: "Finding the place", Icon: MapPin },
   search_nearby: { label: "Looking around", Icon: Search },
   where_am_i: { label: "Locating you", Icon: Compass },
+  plan_trip: { label: "Planning the trip", Icon: Navigation },
   calculate_route: { label: "Working out the route", Icon: Route },
   check_route_conditions: { label: "Checking the route", Icon: Route },
+  check_road_traffic: { label: "Checking traffic", Icon: Route },
+  explore_area: { label: "Exploring the area", Icon: MapPin },
+  web_lookup: { label: "Searching the web", Icon: Search },
   scan_surroundings: { label: "Scanning your surroundings", Icon: Compass },
   get_weather: { label: "Checking the weather", Icon: Search },
   check_journey_weather: { label: "Checking weather ahead", Icon: Route },

@@ -59,8 +59,14 @@ export interface RouteConditions {
 
 export interface TrafficProvider {
   readonly name: string;
-  /** Sample conditions at points along a route. */
-  sampleAlong(points: LatLng[]): Promise<RouteConditions>;
+  /**
+   * Sample conditions at points along a route.
+   *
+   * `count` caps how many points are sampled — each one is a request against
+   * the provider's daily quota, so callers that already chose their points
+   * (a named road) pass exactly how many they want.
+   */
+  sampleAlong(points: LatLng[], count?: number): Promise<RouteConditions>;
 }
 
 /**

@@ -20,15 +20,22 @@
  * `generateContent` is stateless, well documented, and completes. Resending
  * history costs tokens the free tier does not meter, so the trade is nearly
  * free here.
+ *
+ * SPEED
+ *
+ * Two changes aimed at the first word arriving sooner. Responses are
+ * streamed, so text reaches the screen (and the speech engine) while the rest
+ * is generated. And the thinking level defaults to LOW: this is a phrasing
+ * task over tool results, not a reasoning problem, and the default level
+ * spends seconds thinking before every reply.
  */
 
 import { GoogleGenAI } from "@google/genai";
 
-import { AGENT_TOOLS, TOOLS_BY_NAME, type ToolContext } from "./tools";
+import { AGENT_TOOLS, TOOLS_BY_NAME, resultForModel, type ToolContext } from "./tools";
 import type { AgentEvent, ChatMessage } from "./agent";
 import { SYSTEM_PROMPT } from "./agent";
 
-/** Free-tier friendly and fast enough for a voice loop. */
 /*
  * gemini-3.7-flash, not 3.8.
  *
@@ -79,6 +86,15 @@ function isRetryableOnAnotherModel(error: unknown): boolean {
 /** Same ceiling as the Claude agent: cost and latency, not capability. */
 const MAX_ITERATIONS = 6;
 
+/** MINIMAL | LOW | MEDIUM | HIGH. Override with GEMINI_THINKING_LEVEL. */
+const DEFAULT_THINKING_LEVEL = "LOW";
+
+/**
+ * Set once a model rejects the thinking setting, so later requests in this
+ * process stop sending it instead of failing and retrying every time.
+ */
+let thinkingRejected = false;
+
 interface GeminiFunctionCall {
   name?: string;
   args?: Record<string, unknown>;
@@ -87,6 +103,9 @@ interface GeminiFunctionCall {
 
 interface GeminiPart {
   text?: string;
+  /** Internal reasoning, when the model chooses to include it. Never shown. */
+  thought?: boolean;
+  thoughtSignature?: string;
   functionCall?: GeminiFunctionCall;
   functionResponse?: { name: string; response: Record<string, unknown> };
 }
@@ -94,6 +113,16 @@ interface GeminiPart {
 interface GeminiContent {
   role: "user" | "model";
   parts: GeminiPart[];
+}
+
+interface GeminiChunk {
+  candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
+}
+
+interface CollectedTurn {
+  parts: GeminiPart[];
+  calls: Array<GeminiFunctionCall & { name: string }>;
+  text: string;
 }
 
 export interface RunGeminiOptions {
@@ -105,17 +134,13 @@ export interface RunGeminiOptions {
    * Let Gemini ground answers on Google Search.
    *
    * Off by default. Grounding genuinely helps — Google's Nigeria place data is
-   * far better than OpenStreetMap's, and it is the only realistic source for
-   * the things OSM simply does not carry, like a photo of a building or a
-   * description of what it looks like. But it also routes around this
+   * far better than OpenStreetMap's — but it also routes around this
    * project's own resolution engine, which is the thing being measured, so
    * turning it on silently would make the harness numbers meaningless.
-   *
-   * Enable deliberately. Note that Google's terms do not allow mixing search
-   * grounding with custom function declarations on every model, so when this
-   * is on the custom tools are still sent and the model chooses.
    */
   grounding?: boolean;
+  /** Per-message context appended to the system instruction. */
+  extraSystem?: string;
 }
 
 export async function* runGeminiAgent(
@@ -130,6 +155,9 @@ export async function* runGeminiAgent(
   let model = ladder[0]!;
 
   const tools = buildTools(options);
+  const systemInstruction = options.extraSystem
+    ? `${SYSTEM_PROMPT}\n\n${options.extraSystem}`
+    : SYSTEM_PROMPT;
 
   const contents: GeminiContent[] = options.messages.map((message) => ({
     role: message.role === "assistant" ? "model" : "user",
@@ -138,29 +166,40 @@ export async function* runGeminiAgent(
 
   try {
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+      let turn: CollectedTurn | null = null;
+
       /*
        * Try the current model; on a quota error move down the ladder and
-       * retry the same turn. Any other error propagates — a malformed request
-       * would fail identically on every model, and retrying it three times
-       * just makes the user wait three times as long for the same failure.
+       * retry the same turn — but only if nothing was shown yet. Once text
+       * has reached the user, switching models mid-sentence would repeat it.
        */
-      let raw: unknown;
-
       for (;;) {
+        let emitted = false;
         try {
-          raw = await callModel(client, {
+          const stream = streamTurn(client, {
             model,
             contents,
             tools,
-            // Gemini has a real system field here, unlike Interactions.
-            systemInstruction: SYSTEM_PROMPT,
+            systemInstruction,
           });
+
+          let step = await stream.next();
+          while (!step.done) {
+            emitted = true;
+            yield { type: "text", delta: step.value };
+            step = await stream.next();
+          }
+          turn = step.value;
           break;
         } catch (error) {
-          if (
-            !isRetryableOnAnotherModel(error) ||
-            modelIndex >= ladder.length - 1
-          ) {
+          const message = error instanceof Error ? error.message : String(error);
+
+          if (!emitted && !thinkingRejected && /thinking/i.test(message)) {
+            thinkingRejected = true;
+            continue;
+          }
+
+          if (emitted || !isRetryableOnAnotherModel(error) || modelIndex >= ladder.length - 1) {
             throw error;
           }
           modelIndex += 1;
@@ -168,35 +207,21 @@ export async function* runGeminiAgent(
         }
       }
 
-      const response = raw as {
-        text?: string;
-        functionCalls?: GeminiFunctionCall[];
-        candidates?: Array<{ content?: GeminiContent }>;
-      };
-
-      const calls = (response.functionCalls ?? []).filter(
-        (call): call is GeminiFunctionCall & { name: string } =>
-          typeof call.name === "string",
-      );
-
-      if (calls.length === 0) {
-        const text = response.text?.trim();
-        if (text) yield { type: "text", delta: text };
+      if (!turn || turn.calls.length === 0) {
         yield { type: "done" };
         return;
       }
 
-      // Prose alongside a tool call is usually "let me check" — worth showing
-      // to someone waiting on a voice reply.
-      const preamble = response.text?.trim();
-      if (preamble) yield { type: "text", delta: `${preamble}\n` };
+      // Prose alongside a tool call is usually "let me check"; keep it on its
+      // own line so the real answer does not run into it.
+      if (turn.text.trim()) yield { type: "text", delta: "\n" };
 
       const results = await Promise.all(
-        calls.map(async (call) => {
+        turn.calls.map(async (call) => {
           const tool = TOOLS_BY_NAME.get(call.name);
 
           if (!tool) {
-            return { call, result: { error: `Unknown tool: ${call.name}` } };
+            return { call, result: { error: `Unknown tool: ${call.name}` } as unknown };
           }
 
           try {
@@ -210,7 +235,7 @@ export async function* runGeminiAgent(
               call,
               result: {
                 error: error instanceof Error ? error.message : "Tool failed.",
-              },
+              } as unknown,
             };
           }
         }),
@@ -226,34 +251,29 @@ export async function* runGeminiAgent(
        *
        * Gemini 3.x attaches a `thoughtSignature` to functionCall parts and
        * requires it back on the next request. Rebuilding the part from the
-       * parsed `functionCalls` array drops that signature, and the API
-       * rejects the follow-up outright:
+       * parsed calls drops that signature, and the API rejects the follow-up:
        *
        *   400 "Function call is missing a thought_signature in functionCall
        *        parts. This is required for tools to work correctly"
        *
-       * Passing `candidates[0].content` straight through preserves the
-       * signature and any thought parts alongside it. Falling back to a
-       * reconstruction only if the shape is unexpected.
+       * Streaming splits text across chunks, so adjacent plain text parts are
+       * rejoined; anything carrying a signature is passed through untouched.
        */
-      const modelTurn = response.candidates?.[0]?.content;
-
-      contents.push(
-        modelTurn?.parts
-          ? { role: "model", parts: modelTurn.parts }
-          : { role: "model", parts: calls.map((call) => ({ functionCall: call })) },
-      );
+      contents.push({ role: "model", parts: mergeTextParts(turn.parts) });
       contents.push({
         role: "user",
-        parts: results.map(({ call, result }) => ({
-          functionResponse: {
-            name: call.name,
-            // Must be an object; a bare string is rejected.
-            response: (typeof result === "object" && result !== null
-              ? result
-              : { value: result }) as Record<string, unknown>,
-          },
-        })),
+        parts: results.map(({ call, result }) => {
+          const forModel = resultForModel(TOOLS_BY_NAME.get(call.name), result);
+          return {
+            functionResponse: {
+              name: call.name,
+              // Must be an object; a bare string is rejected.
+              response: (typeof forModel === "object" && forModel !== null
+                ? forModel
+                : { value: forModel }) as Record<string, unknown>,
+            },
+          };
+        }),
       });
     }
 
@@ -267,11 +287,14 @@ export async function* runGeminiAgent(
 }
 
 /**
- * The SDK's public `generateContent` is not in the exported type surface for
- * this shape, so the call is made through a narrow local type rather than
+ * One streamed model turn: yields visible text as it arrives, returns every
+ * part (for the echo) and every function call once the stream ends.
+ *
+ * The SDK's `generateContentStream` is not in the exported type surface for
+ * this shape, so the call goes through a narrow local type rather than
  * spreading `any` through the loop above.
  */
-async function callModel(
+async function* streamTurn(
   client: GoogleGenAI,
   params: {
     model: string;
@@ -279,19 +302,64 @@ async function callModel(
     tools: unknown[];
     systemInstruction: string;
   },
-): Promise<unknown> {
+): AsyncGenerator<string, CollectedTurn> {
   const models = client.models as unknown as {
-    generateContent(input: Record<string, unknown>): Promise<unknown>;
+    generateContentStream(input: Record<string, unknown>): Promise<AsyncIterable<GeminiChunk>>;
   };
 
-  return models.generateContent({
+  const level = (process.env.GEMINI_THINKING_LEVEL?.trim() || DEFAULT_THINKING_LEVEL).toUpperCase();
+
+  const stream = await models.generateContentStream({
     model: params.model,
     contents: params.contents,
     config: {
       tools: params.tools,
       systemInstruction: params.systemInstruction,
+      ...(thinkingRejected || level === "DEFAULT"
+        ? {}
+        : { thinkingConfig: { thinkingLevel: level } }),
     },
   });
+
+  const collected: CollectedTurn = { parts: [], calls: [], text: "" };
+
+  for await (const chunk of stream) {
+    for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
+      collected.parts.push(part);
+
+      if (part.functionCall && typeof part.functionCall.name === "string") {
+        collected.calls.push(part.functionCall as GeminiFunctionCall & { name: string });
+      } else if (typeof part.text === "string" && part.text && !part.thought) {
+        collected.text += part.text;
+        yield part.text;
+      }
+    }
+  }
+
+  return collected;
+}
+
+/** Join consecutive plain text parts; leave signed and non-text parts alone. */
+function mergeTextParts(parts: GeminiPart[]): GeminiPart[] {
+  const merged: GeminiPart[] = [];
+
+  for (const part of parts) {
+    const previous = merged[merged.length - 1];
+    const plain = (p: GeminiPart | undefined) =>
+      p !== undefined &&
+      typeof p.text === "string" &&
+      !p.functionCall &&
+      !p.thoughtSignature &&
+      !p.thought;
+
+    if (plain(part) && plain(previous)) {
+      previous!.text = `${previous!.text}${part.text}`;
+    } else {
+      merged.push({ ...part });
+    }
+  }
+
+  return merged.length > 0 ? merged : [{ text: "" }];
 }
 
 function buildTools(options: RunGeminiOptions): unknown[] {
@@ -313,8 +381,8 @@ function buildTools(options: RunGeminiOptions): unknown[] {
 function describeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
-  // The three failures a Gemini key actually hits, named plainly rather than
-  // handed back as a raw stack.
+  // The failures a Gemini key actually hits, named plainly rather than handed
+  // back as a raw stack.
   if (/429|RESOURCE_EXHAUSTED|quota/i.test(message)) {
     return "Gemini's free-tier daily limit is reached on every model right now. It resets tomorrow, or add a paid plan.";
   }
@@ -322,7 +390,7 @@ function describeError(error: unknown): string {
     return "Gemini is overloaded on every model right now. Try again in a moment.";
   }
   if (/API key|401|403|PERMISSION_DENIED|API_KEY_INVALID/i.test(message)) {
-    return "The Gemini API key was rejected. Check GEMINI_API_KEY in .env.local.";
+    return "The Gemini API key was rejected. Check GEMINI_API_KEY.";
   }
   if (/404|NOT_FOUND/i.test(message)) {
     return "That Gemini model is not available to this key. Try GEMINI_CHAT_MODEL=gemini-2.5-flash.";

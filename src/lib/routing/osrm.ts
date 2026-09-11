@@ -6,9 +6,9 @@
  * for localhost and the V0.1 gate, not fine for shipping. Point OSRM_BASE_URL
  * at your own instance (or a hosted OSRM) before this reaches real users.
  *
- * Scope note: this returns a route, a distance and a duration. It is not
- * turn-by-turn navigation, which needs continuous position matching and is a
- * V0.3+ concern.
+ * Steps carry the manoeuvre's location, which is what live navigation needs to
+ * say "in 200 m, turn left": the phone projects itself onto the route and
+ * measures the distance to the next manoeuvre point.
  */
 
 import type { LatLng } from "@/lib/geo/distance";
@@ -16,6 +16,11 @@ import { throttledFetchJson } from "@/lib/net/throttle";
 
 const DEFAULT_BASE = "https://router.project-osrm.org";
 const MIN_INTERVAL_MS = 600;
+/**
+ * The demo server answers in one to five seconds depending on its load. A
+ * route that has not come back in ten is not coming back in a useful time.
+ */
+const ROUTE_TIMEOUT_MS = 10_000;
 
 export type TravelMode = "driving" | "walking" | "cycling";
 
@@ -26,10 +31,26 @@ const PROFILE: Record<TravelMode, string> = {
   cycling: "bike",
 };
 
+/**
+ * Walking and cycling speeds, used because the public demo server only has
+ * the car profile loaded (see `durationEstimated`).
+ */
+const MODE_SPEED_MPS: Record<TravelMode, number | null> = {
+  driving: null,
+  walking: 1.35,
+  cycling: 4.2,
+};
+
 export interface RouteStep {
   instruction: string;
   distanceM: number;
   name: string;
+  /** Where the manoeuvre happens. */
+  location: LatLng | null;
+  /** OSRM manoeuvre type: "turn", "roundabout", "arrive"… */
+  type?: string;
+  /** "left", "slight right", "straight"… */
+  modifier?: string;
 }
 
 export interface RouteResult {
@@ -62,10 +83,20 @@ interface OsrmResponse {
       steps?: Array<{
         distance: number;
         name?: string;
-        maneuver?: { type?: string; modifier?: string };
+        maneuver?: { type?: string; modifier?: string; location?: [number, number] };
       }>;
     }>;
   }>;
+}
+
+interface OsrmTableResponse {
+  code: string;
+  durations?: Array<Array<number | null>>;
+  distances?: Array<Array<number | null>>;
+}
+
+function baseUrl(): string {
+  return process.env.OSRM_BASE_URL?.trim() || DEFAULT_BASE;
 }
 
 export async function computeRoute(
@@ -94,7 +125,6 @@ export async function computeRoutes(
   mode: TravelMode = "driving",
   alternatives = true,
 ): Promise<RouteResult[]> {
-  const base = process.env.OSRM_BASE_URL?.trim() || DEFAULT_BASE;
   const profile = PROFILE[mode];
 
   // OSRM takes lon,lat — the reverse of almost everything else here, and an
@@ -107,13 +137,16 @@ export async function computeRoutes(
     alternatives: alternatives ? "true" : "false",
   });
 
-  const url = `${base}/route/v1/${profile}/${coords}?${params.toString()}`;
+  const url = `${baseUrl()}/route/v1/${profile}/${coords}?${params.toString()}`;
 
   const response = await throttledFetchJson<OsrmResponse>(url, {
     minIntervalMs: MIN_INTERVAL_MS,
+    timeoutMs: ROUTE_TIMEOUT_MS,
   }).catch(() => null);
 
   if (!response || response.code !== "Ok" || !response.routes?.length) return [];
+
+  const modeSpeedMps = MODE_SPEED_MPS[mode];
 
   return response.routes.map((route) => {
     /*
@@ -126,7 +159,6 @@ export async function computeRoutes(
      * drop the correction entirely.
      */
     const routedSeconds = Math.round(route.duration);
-    const modeSpeedMps = mode === "walking" ? 1.35 : mode === "cycling" ? 4.2 : null;
 
     const durationS =
       modeSpeedMps === null
@@ -134,15 +166,24 @@ export async function computeRoutes(
         : Math.round(route.distance / modeSpeedMps);
 
     const steps: RouteStep[] = (route.legs?.[0]?.steps ?? [])
-      .map((step) => ({
-        instruction: describeManeuver(
-          step.maneuver?.type,
-          step.maneuver?.modifier,
-          step.name,
-        ),
-        distanceM: Math.round(step.distance),
-        name: step.name ?? "",
-      }))
+      .map((step) => {
+        const location = step.maneuver?.location;
+        return {
+          instruction: describeManeuver(
+            step.maneuver?.type,
+            step.maneuver?.modifier,
+            step.name,
+          ),
+          distanceM: Math.round(step.distance),
+          name: step.name ?? "",
+          location:
+            location && location.length === 2
+              ? { lat: location[1], lng: location[0] }
+              : null,
+          type: step.maneuver?.type,
+          modifier: step.maneuver?.modifier,
+        };
+      })
       .filter((step) => step.distanceM > 0 || step.instruction !== "");
 
     return {
@@ -152,6 +193,53 @@ export async function computeRoutes(
       geometry: route.geometry ?? null,
       steps,
       mode,
+    };
+  });
+}
+
+/**
+ * Road distance and time from one point to several, in a single request.
+ *
+ * "Closest" should mean closest by road. A restaurant 600 m away across an
+ * expressway with no crossing is further than one 900 m away down the same
+ * street, and straight-line distance cannot tell them apart. OSRM's table
+ * service answers the whole list at once.
+ *
+ * Returns null entries rather than throwing when the server is slow or a
+ * point is unreachable — callers fall back to straight-line distance, which
+ * is worse but never wrong about which way the answer leans by much.
+ */
+export async function travelTimesFrom(
+  origin: LatLng,
+  destinations: LatLng[],
+  mode: TravelMode = "driving",
+  timeoutMs = 3_500,
+): Promise<Array<{ durationS: number; distanceM: number } | null>> {
+  if (destinations.length === 0) return [];
+
+  const coords = [origin, ...destinations].map((p) => `${p.lng},${p.lat}`).join(";");
+  const url = `${baseUrl()}/table/v1/${PROFILE[mode]}/${coords}?sources=0&annotations=duration,distance`;
+
+  const response = await throttledFetchJson<OsrmTableResponse>(url, {
+    minIntervalMs: MIN_INTERVAL_MS,
+    timeoutMs,
+    ttlMs: 5 * 60 * 1000,
+  }).catch(() => null);
+
+  if (!response || response.code !== "Ok") return destinations.map(() => null);
+
+  const durations = response.durations?.[0] ?? [];
+  const distances = response.distances?.[0] ?? [];
+  const speed = MODE_SPEED_MPS[mode];
+
+  return destinations.map((_, index) => {
+    const distance = distances[index + 1];
+    const duration = durations[index + 1];
+    if (typeof distance !== "number" || typeof duration !== "number") return null;
+
+    return {
+      distanceM: Math.round(distance),
+      durationS: Math.round(speed ? distance / speed : duration),
     };
   });
 }

@@ -7,17 +7,27 @@
  * the weather doing, then the few things they do repeatedly. Recents sit above
  * saved places because in practice people return to somewhere they went last
  * week far more often than they consult a list they curated once.
+ *
+ * The quick actions search directly and pin the results on the map. They used
+ * to go through the assistant, which made the most-tapped buttons in the app
+ * the slowest ones, and spent the model's small daily quota on requests that
+ * need no language understanding at all.
  */
 
 import {
+  Banknote,
+  BedDouble,
+  Bus,
+  Clock,
   Fuel,
   Hospital,
   MapPin,
   Mic,
+  Pill,
   Search,
+  Shield,
   Star,
   UtensilsCrossed,
-  Clock,
 } from "lucide-react";
 
 import type { WeatherReport } from "@/lib/weather/open-meteo";
@@ -36,15 +46,20 @@ export interface HomePanelProps {
   userLocation: LatLng | null;
   onSearch: () => void;
   onVoice: () => void;
-  onAsk: (phrase: string) => void;
+  /** Search a category directly and pin the results. */
+  onCategory: (query: string, label: string) => void;
   onOpenPlace: (point: LatLng, name: string) => void;
 }
 
 const QUICK_ACTIONS = [
-  { label: "Fuel", phrase: "Find a filling station near me", Icon: Fuel, tint: "#f59e0b" },
-  { label: "Food", phrase: "Find a restaurant near me", Icon: UtensilsCrossed, tint: "#ef4444" },
-  { label: "Hospital", phrase: "Find a hospital near me", Icon: Hospital, tint: "#10b981" },
-  { label: "Pharmacy", phrase: "Find a pharmacy near me", Icon: Star, tint: "#8b5cf6" },
+  { label: "Food", query: "restaurant", Icon: UtensilsCrossed, tint: "#ef4444" },
+  { label: "Fuel", query: "fuel", Icon: Fuel, tint: "#f59e0b" },
+  { label: "Hospital", query: "hospital", Icon: Hospital, tint: "#10b981" },
+  { label: "Pharmacy", query: "pharmacy", Icon: Pill, tint: "#8b5cf6" },
+  { label: "ATM", query: "atm", Icon: Banknote, tint: "#3b82f6" },
+  { label: "Bus park", query: "bus station", Icon: Bus, tint: "#0ea5e9" },
+  { label: "Hotel", query: "hotel", Icon: BedDouble, tint: "#6366f1" },
+  { label: "Police", query: "police station", Icon: Shield, tint: "#64748b" },
 ] as const;
 
 export default function HomePanel({
@@ -56,7 +71,7 @@ export default function HomePanel({
   userLocation,
   onSearch,
   onVoice,
-  onAsk,
+  onCategory,
   onOpenPlace,
 }: HomePanelProps) {
   return (
@@ -99,14 +114,14 @@ export default function HomePanel({
       />
 
       <section>
-        <h2 className={styles.sectionTitle}>Quick actions</h2>
+        <h2 className={styles.sectionTitle}>Find nearby</h2>
         <div className={styles.actionGrid}>
-          {QUICK_ACTIONS.map(({ label, phrase, Icon, tint }) => (
+          {QUICK_ACTIONS.map(({ label, query, Icon, tint }) => (
             <button
               key={label}
               type="button"
               className={styles.action}
-              onClick={() => onAsk(phrase)}
+              onClick={() => onCategory(query, label)}
             >
               <span
                 className={styles.actionIcon}
@@ -185,7 +200,7 @@ export function PlaceRow({
   return (
     <button type="button" className={styles.placeRow} onClick={onClick}>
       <span className={styles.placeIcon} aria-hidden="true">
-        {icon}
+        {icon ?? <MapPin size={16} />}
       </span>
       <span className={styles.placeText}>
         <span className={styles.placeName}>{name}</span>

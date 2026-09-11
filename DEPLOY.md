@@ -41,7 +41,9 @@ Set these in Vercel → Project → Settings → Environment Variables:
 |---|---|---|
 | `OSM_USER_AGENT` | **Set this one.** Nominatim policy | Falls back to a generic string; see the warning below |
 | `ANTHROPIC_API_KEY` | The real assistant | Falls back to keyword matching, announced in-app |
-| `TOMTOM_API_KEY` | Live traffic | `check_route_conditions` reports traffic as unknown |
+| `TOMTOM_API_KEY` | Live traffic: the coloured traffic layer, traffic on named roads, traffic on every planned trip | Traffic is reported as unknown everywhere and the layer stays off |
+| `FAST_REPLIES` | `off` makes the model phrase every answer | Recognised requests are answered from their results in ~1s |
+| `GEMINI_THINKING_LEVEL` | Gemini reasoning depth | `LOW` |
 | `ANTHROPIC_CHAT_MODEL` | Model choice | `claude-haiku-4-5` |
 | `OSRM_BASE_URL` | Own routing server | Public OSRM demo (no SLA) |
 | `NEXT_PUBLIC_SUPABASE_URL` | Durable SOS alerts and incident reports | Safety data lives in memory; `/api/health` says so |
@@ -124,6 +126,18 @@ The point of deploying. In rough order of what is most likely to be wrong:
 - [ ] **Geolocation accuracy.** Tap the crosshair. Compare the pin to where you
       actually are. On iOS this goes through Core Location, so it should be
       GPS-accurate outdoors and poor indoors.
+- [ ] **Live movement.** Walk a block. The marker should glide rather than
+      jump, the cone should point where you are going, and turning the phone
+      while standing still should turn the cone (iOS asks for motion access the
+      first time you tap a mode button). In a car it should become a car that
+      turns with the road; if it does not, tap the car button on the left.
+- [ ] **Navigation.** Ask for somewhere, say "take me there". The green banner
+      should show the next turn and count down to it, speak it, and — if you
+      deliberately take a different street — say "Rerouting" within about
+      twenty seconds.
+- [ ] **Traffic layer.** Tap the traffic-cone button. With `TOMTOM_API_KEY`
+      set, main roads turn green, yellow and red; without it the legend says
+      traffic is not connected.
 - [ ] **Microphone permission.** Tap the centre voice button. HTTPS is required
       and Vercel provides it, but iOS Safari does not support the speech
       recognition API at all — expect the overlay to say so and the text input

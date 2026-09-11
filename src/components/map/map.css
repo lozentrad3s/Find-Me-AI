@@ -1,0 +1,126 @@
+/* The live user marker and the traffic layer. Global because Leaflet builds
+   marker DOM from HTML strings, outside React's reach. */
+
+.fm-user {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+}
+
+.fm-user-halo {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: var(--primary);
+  opacity: 0.18;
+  animation: fm-user-pulse 2.4s cubic-bezier(0.23, 1, 0.32, 1) infinite;
+}
+
+/* The direction cone: points where you are heading (or facing, standing still). */
+.fm-user-cone {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  margin-left: -15px;
+  margin-top: -32px;
+  border-left: 15px solid transparent;
+  border-right: 15px solid transparent;
+  border-bottom: 28px solid var(--primary);
+  opacity: 0;
+  transform-origin: 15px 32px;
+  transition:
+    transform 0.45s cubic-bezier(0.23, 1, 0.32, 1),
+    opacity 0.3s ease;
+  filter: blur(0.4px);
+}
+
+.fm-user[data-heading="true"] .fm-user-cone {
+  opacity: 0.32;
+}
+
+.fm-user-body {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 3px solid var(--surface);
+  box-shadow:
+    0 0 0 1px var(--primary),
+    0 3px 10px rgb(12 74 110 / 0.35);
+  color: var(--on-primary);
+  transition:
+    width 0.2s ease,
+    height 0.2s ease,
+    border-radius 0.2s ease,
+    transform 0.45s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.fm-user[data-mode="foot"] .fm-user-body,
+.fm-user[data-mode="bike"] .fm-user-body {
+  width: 32px;
+  height: 32px;
+}
+
+/* In a car the whole marker is the car, and it turns with the road. */
+.fm-user[data-mode="car"] .fm-user-body {
+  width: 30px;
+  height: 38px;
+  border-radius: 11px;
+}
+
+.fm-user[data-mode="car"] .fm-user-cone {
+  display: none;
+}
+
+.fm-user-glyph {
+  display: grid;
+  place-items: center;
+}
+
+.fm-user-glyph svg {
+  width: 18px;
+  height: 18px;
+}
+
+.fm-user[data-mode="car"] .fm-user-glyph svg {
+  width: 22px;
+  height: 26px;
+}
+
+@keyframes fm-user-pulse {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.35;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fm-user-halo {
+    animation: none;
+  }
+  .fm-user-cone,
+  .fm-user-body {
+    transition: none;
+  }
+}
+
+/* Traffic tiles sit between the base map and the route line, and never take
+   a tap meant for the map underneath. */
+.leaflet-traffic-pane {
+  pointer-events: none;
+}
+
+.leaflet-traffic-pane img {
+  pointer-events: none;
+}
