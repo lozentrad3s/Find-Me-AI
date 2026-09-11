@@ -31,7 +31,9 @@ gh repo create find-me --private --source=. --push
 ## 2. Environment variables
 
 **All of them are optional.** The map, search, routing and weather work on an
-empty environment — that is deliberate.
+empty environment — that is deliberate. The exception is the safety block: SOS
+without Supabase runs in memory, and on serverless an alert can vanish when an
+instance recycles. Do not show SOS to anyone outside the team before it is set.
 
 Set these in Vercel → Project → Settings → Environment Variables:
 
@@ -42,6 +44,13 @@ Set these in Vercel → Project → Settings → Environment Variables:
 | `TOMTOM_API_KEY` | Live traffic | `check_route_conditions` reports traffic as unknown |
 | `ANTHROPIC_CHAT_MODEL` | Model choice | `claude-haiku-4-5` |
 | `OSRM_BASE_URL` | Own routing server | Public OSRM demo (no SLA) |
+| `NEXT_PUBLIC_SUPABASE_URL` | Durable SOS alerts and incident reports | Safety data lives in memory; `/api/health` says so |
+| `SUPABASE_SERVICE_ROLE_KEY` | Same. Server only — never give it a `NEXT_PUBLIC_` name | Same |
+| `SAFETY_SALT` | Hashing reporter identity for incident confirmations | A fixed fallback salt |
+
+Before setting the Supabase pair, apply the migrations: `npx supabase db push`.
+Setting the keys against an empty database gives you a store that fails every
+write, which `/api/health` reports as a failing `safety:store` check.
 
 `OSM_USER_AGENT` should carry a real contact, e.g.:
 
