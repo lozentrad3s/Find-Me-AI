@@ -11,7 +11,10 @@
 -- are the training signal that no competitor is collecting.
 -- ---------------------------------------------------------------------------
 
-create extension if not exists "uuid-ossp";
+-- IDs use gen_random_uuid(), built into Postgres 13+. Not uuid-ossp: on
+-- Supabase that extension lives in the `extensions` schema, which is not on
+-- the search path `supabase db push` migrates with, so its functions do not
+-- resolve here.
 
 -- ---------------------------------------------------------------------------
 -- resolutions — one row per attempt to turn a phrase into a point
@@ -20,7 +23,7 @@ create extension if not exists "uuid-ossp";
 create type confidence_band as enum ('high', 'moderate', 'low');
 
 create table resolutions (
-  id                uuid primary key default uuid_generate_v4(),
+  id                uuid primary key default gen_random_uuid(),
   -- Nullable: resolution must work before sign-in, and anonymous attempts are
   -- still valuable data.
   user_id           uuid references auth.users (id) on delete set null,
@@ -89,7 +92,7 @@ create index resolutions_confirmed_point_idx on resolutions (chosen_lat, chosen_
 -- ---------------------------------------------------------------------------
 
 create table place_corrections (
-  id             uuid primary key default uuid_generate_v4(),
+  id             uuid primary key default gen_random_uuid(),
   resolution_id  uuid references resolutions (id) on delete cascade,
   user_id        uuid references auth.users (id) on delete set null,
 
@@ -121,7 +124,7 @@ comment on table place_corrections is
 -- ---------------------------------------------------------------------------
 
 create table landmarks (
-  id               uuid primary key default uuid_generate_v4(),
+  id               uuid primary key default gen_random_uuid(),
   name             text not null,
   -- Colloquial names and abbreviations: "JUTH" for the teaching hospital.
   aliases          text[] not null default '{}',
@@ -157,7 +160,7 @@ create index landmarks_aliases_idx   on landmarks using gin (aliases);
 -- ---------------------------------------------------------------------------
 
 create table place_aliases (
-  id           uuid primary key default uuid_generate_v4(),
+  id           uuid primary key default gen_random_uuid(),
   -- Null = everyone. Set = private to that user.
   user_id      uuid references auth.users (id) on delete cascade,
 
