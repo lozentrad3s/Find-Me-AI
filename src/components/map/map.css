@@ -167,6 +167,13 @@
     0 0 4px rgb(0 0 0 / 0.7);
 }
 
+/* Attribution is a licence condition, so it must stay legible rather than
+   sitting behind the tab bar as it did on the phone. */
+.leaflet-container .leaflet-control-attribution {
+  margin-bottom: calc(78px + env(safe-area-inset-bottom, 0px));
+  border-radius: var(--radius-sm) 0 0 0;
+}
+
 /* Traffic tiles sit between the base map and the route line, and never take
    a tap meant for the map underneath. */
 .leaflet-traffic-pane {

@@ -18,9 +18,18 @@ export const runtime = "nodejs";
 /** Above this the query is too big to be either fast or useful. */
 const MAX_SPAN_DEG = 0.08; // roughly 9 km
 const MAX_RESULTS = 120;
-/** The map redraws often; this is decoration, so it fails fast. */
-const TOTAL_BUDGET_MS = 5_000;
-const ATTEMPT_BUDGET_MS = 4_000;
+/**
+ * Budgets, set from measurement rather than taste.
+ *
+ * From a laptop the main Overpass mirror answers this query in about a
+ * second. From Vercel's Frankfurt region the same request came back empty
+ * every time on a 4s per-attempt budget — the volunteer mirrors are slower
+ * and rate-limit cloud IP ranges harder than home connections. The labels are
+ * decoration, so they must not hold a response for long, but they do need
+ * enough room for one honest attempt.
+ */
+const TOTAL_BUDGET_MS = 12_000;
+const ATTEMPT_BUDGET_MS = 8_000;
 
 /** Which pin to draw. Keep in step with the icons in MapView. */
 const CATEGORY: Array<{ test: (tags: Record<string, string>) => boolean; kind: string }> = [
@@ -78,11 +87,23 @@ export async function GET(request: Request): Promise<Response> {
     );
   }
 
+  const startedAt = Date.now();
   const elements = await overpassQuery(
     query(south, west, north, east),
     TOTAL_BUDGET_MS,
     ATTEMPT_BUDGET_MS,
   ).catch(() => []);
+
+  /*
+   * Empty because nobody mapped it, or empty because nobody answered?
+   *
+   * Those are different facts and the map should not conflate them. A query
+   * that comes back empty in a few hundred milliseconds really did find
+   * nothing; one that comes back empty after the whole budget means every
+   * mirror timed out — which is what production was doing while the same
+   * query answered from a laptop in about a second.
+   */
+  const exhausted = Date.now() - startedAt > TOTAL_BUDGET_MS * 0.8;
 
   const seen = new Set<string>();
   const places = elements.flatMap((element) => {
@@ -110,12 +131,20 @@ export async function GET(request: Request): Promise<Response> {
     {
       places,
       count: places.length,
-      // Said plainly: an empty map here is thin data, not a broken request.
+      /*
+       * An outage and a blank neighbourhood look identical from the outside,
+       * and saying "nothing is mapped here" when the truth is "nobody
+       * answered" teaches people to distrust the map for no reason.
+       */
+      unavailable: places.length === 0 && exhausted,
       note:
-        places.length === 0
-          ? "No named places are mapped in this view. OpenStreetMap coverage is uneven in Nigeria."
-          : null,
+        places.length > 0
+          ? null
+          : exhausted
+            ? "The map data service did not answer in time, so labels are missing here. This is an outage, not an empty neighbourhood."
+            : "No named places are mapped in this view. OpenStreetMap coverage is uneven in Nigeria.",
     },
+
     // Places do not move; the map asks again as the user pans.
     { headers: { "Cache-Control": "public, max-age=600, s-maxage=1800" } },
   );
