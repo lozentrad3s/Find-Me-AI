@@ -21,19 +21,18 @@ const MAX_RESULTS = 120;
 /**
  * Budgets, set from measurement rather than taste.
  *
- * From a laptop the main Overpass mirror answers this query in about a
- * second. From Vercel's Frankfurt region it is far less predictable: boxes
- * over Wuse 2 and Dutse answered in 1.7-2.7s, while a box over the Central
- * Business District — denser, so a heavier query — burned the whole 12s
- * budget across every mirror and returned nothing.
+ * Overpass answers a *repeated* query from its own cache in a second or two,
+ * and a cold one over Abuja in closer to ten — which is why boxes that had
+ * answered in 1.7-2.7s all failed the moment the query text changed and every
+ * box became a cold miss again. Cutting the budget to 5s made every cold area
+ * permanently blank; the honest shape is a long budget for the rare cold miss.
  *
- * Thirteen seconds of blank map is worse than a quick blank map, so the
- * budget is back down to something a person would not notice waiting for.
- * The real fix for density is the cache below: one slow miss populates the
- * edge for half an hour, and the misses stop.
+ * It costs nothing visible: labels are fetched in the background and drawn
+ * when they arrive, so the map is usable throughout. And the cache below means
+ * one slow miss per area serves everyone after it.
  */
-const TOTAL_BUDGET_MS = 6_000;
-const ATTEMPT_BUDGET_MS = 5_000;
+const TOTAL_BUDGET_MS = 14_000;
+const ATTEMPT_BUDGET_MS = 9_000;
 
 /** Which pin to draw. Keep in step with the icons in MapView. */
 const CATEGORY: Array<{ test: (tags: Record<string, string>) => boolean; kind: string }> = [
