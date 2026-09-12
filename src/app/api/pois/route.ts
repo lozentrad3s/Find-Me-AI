@@ -22,14 +22,18 @@ const MAX_RESULTS = 120;
  * Budgets, set from measurement rather than taste.
  *
  * From a laptop the main Overpass mirror answers this query in about a
- * second. From Vercel's Frankfurt region the same request came back empty
- * every time on a 4s per-attempt budget — the volunteer mirrors are slower
- * and rate-limit cloud IP ranges harder than home connections. The labels are
- * decoration, so they must not hold a response for long, but they do need
- * enough room for one honest attempt.
+ * second. From Vercel's Frankfurt region it is far less predictable: boxes
+ * over Wuse 2 and Dutse answered in 1.7-2.7s, while a box over the Central
+ * Business District — denser, so a heavier query — burned the whole 12s
+ * budget across every mirror and returned nothing.
+ *
+ * Thirteen seconds of blank map is worse than a quick blank map, so the
+ * budget is back down to something a person would not notice waiting for.
+ * The real fix for density is the cache below: one slow miss populates the
+ * edge for half an hour, and the misses stop.
  */
-const TOTAL_BUDGET_MS = 12_000;
-const ATTEMPT_BUDGET_MS = 8_000;
+const TOTAL_BUDGET_MS = 6_000;
+const ATTEMPT_BUDGET_MS = 5_000;
 
 /** Which pin to draw. Keep in step with the icons in MapView. */
 const CATEGORY: Array<{ test: (tags: Record<string, string>) => boolean; kind: string }> = [
@@ -54,7 +58,7 @@ function query(south: number, west: number, north: number, east: number): string
   return `[out:json][timeout:12];
 (
   nwr["amenity"~"^(restaurant|fast_food|cafe|bar|pub|fuel|pharmacy|hospital|clinic|doctors|school|college|university|kindergarten|bank|atm|marketplace|place_of_worship|police|fire_station|bus_station|cinema|library|courthouse|townhall)$"]["name"]${box};
-  nwr["shop"]["name"]${box};
+  nwr["shop"~"^(supermarket|mall|convenience|bakery|butcher|car_repair|hardware|mobile_phone|clothes|electronics|furniture)$"]["name"]${box};
   nwr["tourism"~"^(hotel|guest_house|motel|hostel|attraction|museum)$"]["name"]${box};
   nwr["leisure"~"^(park|stadium|fitness_centre|sports_centre)$"]["name"]${box};
   nwr["office"~"^(government|diplomatic)$"]["name"]${box};
@@ -145,7 +149,17 @@ export async function GET(request: Request): Promise<Response> {
             : "No named places are mapped in this view. OpenStreetMap coverage is uneven in Nigeria.",
     },
 
-    // Places do not move; the map asks again as the user pans.
-    { headers: { "Cache-Control": "public, max-age=600, s-maxage=1800" } },
+    {
+      headers: {
+        // Places do not move, so a success is cached hard at the edge: one
+        // slow miss over a dense area serves every later viewer instantly,
+        // which is the only thing that makes the volunteer service viable
+        // here. A failure must NOT be cached for half an hour, or one bad
+        // moment blanks that neighbourhood for everyone until it expires.
+        "Cache-Control": exhausted
+          ? "public, max-age=15, s-maxage=30"
+          : "public, max-age=600, s-maxage=1800, stale-while-revalidate=86400",
+      },
+    },
   );
 }
