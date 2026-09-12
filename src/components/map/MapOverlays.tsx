@@ -10,6 +10,7 @@
  * from the search API, with no model call to wait for or quota to spend.
  */
 
+import { useState } from "react";
 import {
   ArrowUp,
   ArrowUpLeft,
@@ -25,8 +26,11 @@ import {
   Footprints,
   Fuel,
   Hospital,
+  Layers,
+  Mic,
   Pill,
   RotateCw,
+  Search,
   Shield,
   Sparkles,
   Undo2,
@@ -39,6 +43,111 @@ import {
 import type { TravelMode } from "@/lib/location/movement";
 import { TRAFFIC_COLOUR } from "@/lib/traffic/colours";
 import styles from "./MapOverlays.module.css";
+
+// ---------------------------------------------------------------------------
+// Search bar
+// ---------------------------------------------------------------------------
+
+/**
+ * The way into the assistant, on the map where people look for it.
+ *
+ * It used to live inside the bottom sheet, which at peek height is mostly
+ * behind the tab bar — so on a phone there was no visible way to ask anything.
+ * Every map app puts this at the top of the map; ours does now too.
+ */
+export function MapSearchBar({
+  onOpen,
+  onVoice,
+  placeholder = "Search or ask Find Me…",
+}: {
+  onOpen: () => void;
+  onVoice: () => void;
+  placeholder?: string;
+}) {
+  return (
+    <div className={styles.searchWrap}>
+      <button type="button" className={styles.search} onClick={onOpen}>
+        <Search size={18} aria-hidden="true" className={styles.searchIcon} />
+        <span className={styles.searchText}>{placeholder}</span>
+      </button>
+      <button
+        type="button"
+        className={styles.searchMic}
+        onClick={onVoice}
+        title="Talk to Find Me"
+      >
+        <Mic size={18} aria-hidden="true" />
+        <span className="sr-only">Talk to Find Me</span>
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Map style
+// ---------------------------------------------------------------------------
+
+export type MapStyle = "streets" | "satellite" | "hybrid";
+
+const STYLE_LABEL: Record<MapStyle, string> = {
+  streets: "Map",
+  satellite: "Satellite",
+  hybrid: "Hybrid",
+};
+
+/**
+ * Streets / Satellite / Hybrid.
+ *
+ * Satellite earns its place here rather than being a novelty: where the map
+ * data is thin — most of Abuja's newer estates — the imagery still shows the
+ * buildings, the compound walls and the tracks between them, which is enough
+ * to tell someone which gate to come to.
+ */
+export function LayersControl({
+  value,
+  onChange,
+}: {
+  value: MapStyle;
+  onChange: (style: MapStyle) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className={styles.layers}>
+      <button
+        type="button"
+        className={styles.layersButton}
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        title="Map style"
+      >
+        <Layers size={18} aria-hidden="true" />
+        <span className="sr-only">Map style</span>
+      </button>
+
+      {open && (
+        <div className={styles.layersMenu} role="radiogroup" aria-label="Map style">
+          {(Object.keys(STYLE_LABEL) as MapStyle[]).map((style) => (
+            <button
+              key={style}
+              type="button"
+              role="radio"
+              aria-checked={value === style}
+              className={styles.layersOption}
+              data-selected={value === style}
+              onClick={() => {
+                onChange(style);
+                setOpen(false);
+              }}
+            >
+              {STYLE_LABEL[style]}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Category chips

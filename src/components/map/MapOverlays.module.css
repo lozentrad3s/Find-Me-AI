@@ -1,10 +1,125 @@
 /* Controls floating over the map. Glass surfaces, 44px touch targets, and
    positions that keep clear of the right-hand button column and the sheet. */
 
+/* --- search bar ----------------------------------------------------------- */
+
+.searchWrap {
+  position: absolute;
+  z-index: 545;
+  top: calc(var(--space-3) + env(safe-area-inset-top, 0px));
+  left: var(--space-3);
+  right: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 48px;
+  padding: 0 6px 0 var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-md);
+}
+
+.search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 100%;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-subtle);
+  font-size: 15px;
+  text-align: left;
+}
+
+.searchIcon {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.searchText {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.searchMic {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--ai-gradient);
+  color: #fff;
+}
+
+/* --- map style ------------------------------------------------------------ */
+
+.layers {
+  position: absolute;
+  z-index: 545;
+  right: var(--space-3);
+  top: calc(124px + env(safe-area-inset-top, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.layersButton {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow: var(--shadow-md);
+  color: var(--fg-muted);
+}
+
+.layersMenu {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  gap: 2px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow: var(--shadow-md);
+  animation: fm-fade-up var(--dur-fast) var(--ease) both;
+}
+
+.layersOption {
+  padding: 8px 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 550;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.layersOption[data-selected="true"] {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
 .chips {
   position: absolute;
   z-index: 540;
-  top: calc(var(--space-3) + env(safe-area-inset-top, 0px));
+  /* Below the search bar, clear of the right-hand button column. */
+  top: calc(72px + env(safe-area-inset-top, 0px));
   left: var(--space-3);
   right: 68px;
   display: flex;
@@ -59,7 +174,8 @@
   position: absolute;
   z-index: 540;
   left: var(--space-3);
-  top: calc(64px + env(safe-area-inset-top, 0px));
+  /* Clear of the search bar and the chips row above it. */
+  top: calc(124px + env(safe-area-inset-top, 0px));
   display: flex;
   flex-direction: column;
   padding: 4px;
@@ -155,7 +271,8 @@
   position: absolute;
   z-index: 540;
   left: var(--space-3);
-  top: calc(250px + env(safe-area-inset-top, 0px));
+  /* Below the four mode buttons (124px + ~176px of controls). */
+  top: calc(310px + env(safe-area-inset-top, 0px));
   width: 150px;
   padding: 10px 12px;
   border: 1px solid var(--glass-border);

@@ -139,6 +139,16 @@ The point of deploying. In rough order of what is most likely to be wrong:
 - [ ] **Traffic layer.** Tap the traffic-cone button. With `TOMTOM_API_KEY`
       set, main roads turn green, yellow and red; without it the legend says
       traffic is not connected.
+- [ ] **Satellite.** Tap the layers button (right side) and switch between
+      Map, Satellite and Hybrid. Imagery is Esri's, free with attribution, and
+      is the one way to see buildings where the street map is empty.
+- [ ] **Place labels.** At street zoom the map should name the shops, schools
+      and clinics around you. There will be far fewer than Google shows —
+      OpenStreetMap had five named places in a 2 km box around Dutse — so
+      judge this against what is actually mapped, not against Google.
+- [ ] **The screen at a glance.** Search bar on top, chips under it, layers and
+      the button column down the right, travel modes down the left, and the
+      panel's first line clear of the tab bar. Nothing should overlap.
 - [ ] **Microphone permission.** Tap the centre voice button. HTTPS is required
       and Vercel provides it, but iOS Safari does not support the speech
       recognition API at all — expect the overlay to say so and the text input

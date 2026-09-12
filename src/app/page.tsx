@@ -35,10 +35,13 @@ import { ProfilePanel, TripsPanel } from "@/components/panels/SimplePanels";
 import SafetyCommunity, { useCommunityFeed } from "@/components/panels/SafetyCommunity";
 import {
   CategoryChips,
+  LayersControl,
+  MapSearchBar,
   ModeSuggestion,
   ModeSwitcher,
   NavBanner,
   TrafficLegend,
+  type MapStyle,
   type ModeChoice,
 } from "@/components/map/MapOverlays";
 import type { CardPlace, ChatCard } from "@/components/chat/Cards";
@@ -203,6 +206,14 @@ export default function Home() {
   const [roadHighlights, setRoadHighlights] = useState<RoadOverlay[]>([]);
   const [trafficOn, setTrafficOn] = useState(false);
   const [trafficAvailable, setTrafficAvailable] = useState<boolean | null>(null);
+  /*
+   * Street map, satellite, or satellite with labels.
+   *
+   * Worth the extra control: in the newer estates around Dutse and Lugbe the
+   * street map is nearly empty, while the imagery shows every building and
+   * compound wall — which is what someone needs to say "the gate on the left".
+   */
+  const [mapStyle, setMapStyle] = useState<MapStyle>("streets");
   const [chipCategory, setChipCategory] = useState<string | null>(null);
 
   // --- trip ---------------------------------------------------------------
@@ -308,6 +319,9 @@ export default function Home() {
 
     const mode = read(MODE_STORAGE_KEY);
     if (mode === "auto" || mode === "foot" || mode === "bike" || mode === "car") setModeChoice(mode);
+
+    const style = read("fm-map-style");
+    if (style === "streets" || style === "satellite" || style === "hybrid") setMapStyle(style);
 
     setRecents(getRecentPlaces());
     setSaved(getSavedPlaces());
@@ -1159,8 +1173,13 @@ export default function Home() {
             ? Math.round((typeof window === "undefined" ? 800 : window.innerHeight) * 0.16)
             : Math.round((typeof window === "undefined" ? 800 : window.innerHeight) * 0.52)
         }
+        mapStyle={mapStyle}
+        // Labels make a map feel like a map. OSM has fewer of them here than
+        // Google does, but the ones it has are what people navigate by.
+        showPlaces
         dark={theme === "dark"}
         heading={heading}
+        speedMps={speedMps}
         travelMode={travelMode}
         accuracyM={geo.accuracyM}
         followUser={followUser}
@@ -1214,6 +1233,27 @@ export default function Home() {
         />
       )}
 
+      {/*
+        The way into the assistant, on the map where people look for it. It
+        used to exist only inside the sheet, which at peek height sits behind
+        the tab bar — so on a phone there was no visible way to ask anything.
+      */}
+      {!navigating && !arrived && <MapSearchBar onOpen={openChat} onVoice={openVoice} />}
+
+      {!navigating && (
+        <LayersControl
+          value={mapStyle}
+          onChange={(style) => {
+            setMapStyle(style);
+            try {
+              window.localStorage.setItem("fm-map-style", style);
+            } catch {
+              /* not worth surfacing */
+            }
+          }}
+        />
+      )}
+
       {trafficOn && !navigating && (
         <TrafficLegend available={trafficAvailable} onClose={() => setTrafficOn(false)} />
       )}
@@ -1221,7 +1261,9 @@ export default function Home() {
       <div
         style={{
           position: "absolute",
-          top: "calc(var(--space-3) + env(safe-area-inset-top, 0px))",
+          // Below the search bar (48px) and the category chips (36px), and
+          // below the layers button, so nothing overlaps on a phone screen.
+          top: "calc(176px + env(safe-area-inset-top, 0px))",
           right: "var(--space-3)",
           zIndex: 550,
           display: "flex",

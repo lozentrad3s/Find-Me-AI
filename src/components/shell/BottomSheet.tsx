@@ -38,9 +38,16 @@ import styles from "./BottomSheet.module.css";
 
 export type Detent = "peek" | "half" | "full";
 
-/** Fraction of viewport height *visible* at each detent. */
+/**
+ * Fraction of viewport height *visible* at each detent.
+ *
+ * Peek is 26%, not 16%: the tab bar is fixed over the bottom ~78px of the
+ * screen, so a 16% peek on a phone left barely a centimetre of content and cut
+ * the panel's first line in half — which is exactly what it looked like in the
+ * screenshots from the phone.
+ */
 const DETENT_HEIGHT: Record<Detent, number> = {
-  peek: 0.16,
+  peek: 0.26,
   half: 0.52,
   full: 0.92,
 };

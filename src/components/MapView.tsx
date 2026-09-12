@@ -20,7 +20,7 @@
  * which way you are heading.
  */
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Circle,
   MapContainer,
@@ -93,9 +93,28 @@ export interface MapViewProps {
    * are centred in the map and half of them sit behind the panel listing them.
    */
   bottomInset?: number;
+  /**
+   * Street map, satellite photography, or photography with labels.
+   *
+   * Satellite is not decoration here: in the newer estates the street map is
+   * nearly empty while the imagery shows every building and compound wall.
+   */
+  mapStyle?: "streets" | "satellite" | "hybrid";
+  /**
+   * Draw the named places in view (shops, schools, clinics) from
+   * `/api/pois`, the way a map app labels its surroundings.
+   */
+  showPlaces?: boolean;
   dark?: boolean;
   /** Degrees clockwise from north; null when unknown. */
   heading?: number | null;
+  /**
+   * Current speed in m/s.
+   *
+   * Lets the marker keep moving between fixes instead of arriving and
+   * stopping once a second, which is what made the motion look mechanical.
+   */
+  speedMps?: number;
   /** Drives which character is drawn on the user marker. */
   travelMode?: TravelMode;
   /** Accuracy halo radius in metres. */
@@ -208,10 +227,13 @@ function UserLayer({
   point,
   heading,
   mode,
+  speedMps = 0,
 }: {
   point: LatLng | null;
   heading: number | null;
   mode: TravelMode;
+  /** Current speed, used to keep moving between fixes. */
+  speedMps?: number;
 }) {
   const map = useMap();
   const markerRef = useRef<L.Marker | null>(null);
@@ -219,6 +241,8 @@ function UserLayer({
   const frameRef = useRef<number | null>(null);
   const modeRef = useRef<TravelMode | null>(null);
   const rotationRef = useRef(0);
+  const motionRef = useRef({ heading: 0, speedMps: 0 });
+  motionRef.current = { heading: heading ?? rotationRef.current, speedMps };
 
   // Create on the first fix; remove on unmount.
   useEffect(() => {
@@ -265,16 +289,50 @@ function UserLayer({
     const started = performance.now();
     const duration = 850;
 
+    /*
+     * Glide to the fix, then keep going.
+     *
+     * A phone reports a position about once a second, so animating only
+     * between fixes makes the marker arrive and stop, arrive and stop — which
+     * reads as stuttering rather than travelling. Past the catch-up the marker
+     * carries on at the measured speed and heading until the next fix
+     * corrects it, which is what makes movement look continuous.
+     *
+     * Dead reckoning is capped at three seconds: after that the fixes have
+     * stopped coming and guessing further would draw someone somewhere they
+     * have not been.
+     */
+    const MAX_COAST_MS = 3_000;
+
     const step = (now: number) => {
-      const t = Math.min(1, (now - started) / duration);
+      const elapsed = now - started;
+      const t = Math.min(1, elapsed / duration);
       const eased = t * (2 - t);
-      const current = L.latLng(
-        from.lat + (to.lat - from.lat) * eased,
-        from.lng + (to.lng - from.lng) * eased,
-      );
+
+      let lat = from.lat + (to.lat - from.lat) * eased;
+      let lng = from.lng + (to.lng - from.lng) * eased;
+
+      if (t >= 1) {
+        const { heading: bearing, speedMps: speed } = motionRef.current;
+        const coastMs = Math.min(MAX_COAST_MS, elapsed - duration);
+
+        if (speed > 0.7 && coastMs > 0) {
+          const metres = speed * (coastMs / 1000);
+          const radians = (bearing * Math.PI) / 180;
+          lat = to.lat + (metres * Math.cos(radians)) / 111_320;
+          lng =
+            to.lng +
+            (metres * Math.sin(radians)) /
+              (111_320 * Math.cos((to.lat * Math.PI) / 180));
+        }
+      }
+
+      const current = L.latLng(lat, lng);
       marker.setLatLng(current);
       shownRef.current = current;
-      frameRef.current = t < 1 ? requestAnimationFrame(step) : null;
+
+      const coasting = t >= 1 && elapsed - duration < MAX_COAST_MS && motionRef.current.speedMps > 0.7;
+      frameRef.current = t < 1 || coasting ? requestAnimationFrame(step) : null;
     };
 
     frameRef.current = requestAnimationFrame(step);
@@ -412,6 +470,133 @@ function PanWatcher({ onUserPan }: { onUserPan?: () => void }) {
   return null;
 }
 
+interface Poi {
+  id: string;
+  name: string;
+  kind: string;
+  lat: number;
+  lng: number;
+}
+
+/** A glyph and a colour per kind, matching the categories `/api/pois` returns. */
+const POI_STYLE: Record<string, { glyph: string; colour: string }> = {
+  food: { glyph: "🍴", colour: "#ef4444" },
+  fuel: { glyph: "⛽", colour: "#f59e0b" },
+  pharmacy: { glyph: "✚", colour: "#8b5cf6" },
+  health: { glyph: "✚", colour: "#10b981" },
+  school: { glyph: "🎓", colour: "#0ea5e9" },
+  bank: { glyph: "₦", colour: "#3b82f6" },
+  worship: { glyph: "✦", colour: "#a16207" },
+  police: { glyph: "★", colour: "#64748b" },
+  transport: { glyph: "🚌", colour: "#0284c7" },
+  shopping: { glyph: "🛒", colour: "#f97316" },
+  hotel: { glyph: "🛏", colour: "#6366f1" },
+  leisure: { glyph: "🌳", colour: "#16a34a" },
+  shop: { glyph: "•", colour: "#64748b" },
+  place: { glyph: "•", colour: "#94a3b8" },
+};
+
+/**
+ * The named places in view — what makes a map feel like a map.
+ *
+ * Google's map of Dutse is covered in pharmacies, academies and lounges
+ * because Google has business listings; ours had nothing but roads. These come
+ * from OpenStreetMap, so there are fewer of them (measured: five in a 2 km box
+ * there), but the ones that exist are the ones people navigate by.
+ *
+ * Fetched on pan and zoom, only at street zoom, and only when the map has been
+ * still for a moment — panning across a city should not fire a request per
+ * frame.
+ */
+function PlacesLayer({ enabled }: { enabled: boolean }) {
+  const map = useMap();
+  const [places, setPlaces] = useState<Poi[]>([]);
+  const requestRef = useRef(0);
+
+  useEffect(() => {
+    if (!enabled) {
+      setPlaces([]);
+      return;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const load = () => {
+      if (map.getZoom() < 15) {
+        setPlaces([]);
+        return;
+      }
+
+      const bounds = map.getBounds();
+      const id = ++requestRef.current;
+      const params = new URLSearchParams({
+        south: bounds.getSouth().toFixed(5),
+        west: bounds.getWest().toFixed(5),
+        north: bounds.getNorth().toFixed(5),
+        east: bounds.getEast().toFixed(5),
+      });
+
+      fetch(`/api/pois?${params.toString()}`)
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data: { places?: Poi[] } | null) => {
+          // A slow response for a view the user has already left is noise.
+          if (id !== requestRef.current) return;
+          setPlaces(data?.places ?? []);
+        })
+        .catch(() => undefined);
+    };
+
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(load, 600);
+    };
+
+    schedule();
+    map.on("moveend", schedule);
+    map.on("zoomend", schedule);
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      map.off("moveend", schedule);
+      map.off("zoomend", schedule);
+    };
+  }, [enabled, map]);
+
+  return (
+    <>
+      {places.map((place) => {
+        const style = POI_STYLE[place.kind] ?? POI_STYLE.place!;
+        return (
+          <Marker
+            key={place.id}
+            position={[place.lat, place.lng]}
+            interactive={false}
+            keyboard={false}
+            icon={L.divIcon({
+              className: "",
+              iconSize: [0, 0],
+              iconAnchor: [0, 0],
+              html: `<span class="fm-poi" style="--poi-colour:${style.colour}">
+                <span class="fm-poi-dot">${style.glyph}</span>
+                <span class="fm-poi-label">${escapeHtml(place.name)}</span>
+              </span>`,
+            })}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+/** Place names come from map data, which is user-edited text. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 /**
  * Split a line into runs coloured by the nearest traffic reading.
  *
@@ -465,7 +650,14 @@ function colourRuns(
 
 export default function MapView({
   center,
-  zoom = 14,
+  /*
+   * Street level, not city level.
+   *
+   * At 14 the phone showed two kilometres of beige with no labels at all,
+   * while Google was at roughly a 50 m scale naming every shop and school.
+   * Most of that gap was zoom: OSM draws almost no place labels until 15-16.
+   */
+  zoom = 16,
   markers,
   routeGeometry,
   routeTraffic,
@@ -473,8 +665,11 @@ export default function MapView({
   focus,
   fitPoints,
   bottomInset = 0,
+  mapStyle = "streets",
+  showPlaces = true,
   dark = false,
   heading = null,
+  speedMps = 0,
   travelMode = "still",
   accuracyM = null,
   followUser = false,
@@ -516,16 +711,49 @@ export default function MapView({
       center={[center.lat, center.lng]}
       zoom={zoom}
       zoomControl={false}
-      className={dark ? "fm-dark-tiles" : undefined}
+      // The dark filter inverts tile colours, which is right for the street
+      // map and very wrong for photography — it turns vegetation magenta. The
+      // imagery class switches place labels to their dark-ground styling.
+      className={
+        [
+          dark && mapStyle === "streets" ? "fm-dark-tiles" : "",
+          mapStyle === "streets" ? "" : "fm-map-imagery",
+        ]
+          .filter(Boolean)
+          .join(" ") || undefined
+      }
       style={{ width: "100%", height: "100%" }}
     >
-      <TileLayer
-        // OSM tile policy: fine for development and low traffic. Move to a
-        // dedicated tile host before this carries real users.
-        url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        maxZoom={19}
-      />
+      {mapStyle === "streets" ? (
+        <TileLayer
+          // OSM tile policy: fine for development and low traffic. Move to a
+          // dedicated tile host before this carries real users.
+          url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          maxZoom={19}
+        />
+      ) : (
+        <>
+          {/*
+            Esri World Imagery: free to use with attribution, no key. Where
+            OSM's Nigerian coverage is thin — most new estates — the imagery
+            still shows the buildings, walls and tracks, which is often the
+            only way to tell someone which gate to come to.
+          */}
+          <TileLayer
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+            attribution="Imagery &copy; Esri, Maxar, Earthstar Geographics"
+            maxZoom={19}
+          />
+          {mapStyle === "hybrid" && (
+            <TileLayer
+              url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+              attribution=""
+              maxZoom={19}
+            />
+          )}
+        </>
+      )}
 
       {/*
         Live traffic. Its own pane so the dark-mode filter on the base tiles
@@ -612,7 +840,9 @@ export default function MapView({
         />
       )}
 
-      <UserLayer point={userPoint} heading={heading} mode={travelMode} />
+      <PlacesLayer enabled={showPlaces} />
+
+      <UserLayer point={userPoint} heading={heading} mode={travelMode} speedMps={speedMps} />
       <FollowController point={userPoint} enabled={followUser} navigating={navigating} />
       <PanWatcher onUserPan={onUserPan} />
 
